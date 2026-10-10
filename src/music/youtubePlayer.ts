@@ -1,4 +1,8 @@
 import { spawn, execFile } from 'node:child_process';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { logger } from '../core/logger.ts';
 
 export interface PlaybackSession {
   /** Резолвится, когда воспроизведение естественным образом завершилось. */
@@ -164,14 +168,66 @@ export interface YoutubePlaybackOptions {
   audioDevice?: string;
 }
 
+const YTDLP_CONCURRENT_FRAGMENTS = 4;
+
 /**
  * Собирает аргументы командной строки yt-dlp для скачивания только аудио
  * заданного видео и вывода его сырых байт в stdout (playYoutubeUrl пускает
  * этот stdout прямо во stdin mpv, см. там подробное объяснение зачем).
+ * infoJsonPath — данные о видео, заранее полученные preloadYoutubeInfo:
+ * тогда yt-dlp не разбирает страницу заново, а сразу начинает качать.
  * Экспортировано отдельно ради юнит-тестов.
  */
-export function buildYtdlpAudioArgs(videoUrl: string, options: YoutubePlaybackOptions): string[] {
-  const args: string[] = ['-f', 'bestaudio', '--no-playlist', '-o', '-'];
+export function buildYtdlpAudioArgs(videoUrl: string, options: YoutubePlaybackOptions, infoJsonPath?: string): string[] {
+  // "/best" — запасной вариант: если YouTube отдал только HLS (m3u8) с
+  // аудио+видео в одном потоке (SABR-эксперимент, отдельных аудиодорожек
+  // нет), "bestaudio" падает с "Requested format is not available", а так
+  // yt-dlp скачает совмещённый поток, и mpv с --no-video сыграет из него звук.
+  //
+  // --abort-on-unavailable-fragments: иначе при 403 на HLS-фрагментах yt-dlp
+  // перебирает по 10 попыток на КАЖДЫЙ фрагмент и пропускает их — на стриме
+  // это долгая тишина, которая всё равно кончается "downloaded file is empty".
+  // Лучше упасть сразу и дать playYoutubeUrl перезапустить загрузку.
+  //
+  // best[height<=480]: видео mpv всё равно выбрасывает, а качаем и держим в
+  // кэше mpv (см. buildMpvStdinArgs) мы его целиком. В HLS YouTube звук у
+  // 480p такой же, как у 360p (AAC 128k), а весит поток в разы меньше 1080p.
+  //
+  // -N: HLS-фрагменты качаются по несколько параллельно (в stdout они всё
+  // равно пишутся по порядку) — один медленный фрагмент не тормозит остальные.
+  const args: string[] = [
+    '-f',
+    'bestaudio/best[height<=480]/best',
+    '--no-playlist',
+    '--concurrent-fragments',
+    String(YTDLP_CONCURRENT_FRAGMENTS),
+    '--fragment-retries',
+    '3',
+    '--abort-on-unavailable-fragments',
+    '-o',
+    '-',
+    ...buildYtdlpAccessArgs(options),
+  ];
+  if (infoJsonPath) {
+    args.push('--load-info-json', infoJsonPath);
+  } else {
+    args.push(videoUrl);
+  }
+  return args;
+}
+
+/**
+ * Аргументы yt-dlp для preloadYoutubeInfo: только разобрать видео и вывести
+ * данные о нём (вместе с готовыми ссылками на форматы) в stdout как JSON.
+ * Экспортировано отдельно ради юнит-тестов.
+ */
+export function buildYtdlpInfoArgs(videoUrl: string, options: YoutubePlaybackOptions): string[] {
+  return ['--dump-json', '--no-playlist', ...buildYtdlpAccessArgs(options), videoUrl];
+}
+
+/** Как yt-dlp заходит на YouTube: клиент, куки, IPv4 — общее для разбора и скачивания. */
+function buildYtdlpAccessArgs(options: YoutubePlaybackOptions): string[] {
+  const args: string[] = [];
   if (options.playerClient) {
     args.push('--extractor-args', `youtube:player_client=${options.playerClient}`);
   }
@@ -183,7 +239,6 @@ export function buildYtdlpAudioArgs(videoUrl: string, options: YoutubePlaybackOp
   if (options.forceIpv4) {
     args.push('--force-ipv4');
   }
-  args.push(videoUrl);
   return args;
 }
 
@@ -201,10 +256,27 @@ export function buildAudioDeviceArg(options: YoutubePlaybackOptions): string[] {
  * Собирает аргументы командной строки mpv для проигрывания аудио, которое
  * приходит через stdin (см. playYoutubeUrl) — "-" в качестве имени файла
  * означает для mpv именно stdin. Экспортировано отдельно ради юнит-тестов.
+ *
+ * --cache=yes: для stdin mpv по умолчанию кэш не включает (только для сетевых
+ * потоков) и читает ровно столько, сколько нужно играть прямо сейчас. Тогда
+ * через переполненный pipe тормозится и yt-dlp — он качает фрагменты "впритык",
+ * и любой медленный фрагмент сразу превращается в заикание звука. С кэшем mpv
+ * вычитывает stdin наперёд (до --demuxer-max-bytes), yt-dlp качает трек на
+ * полной скорости, и запас копится с первых секунд.
  */
 export function buildMpvStdinArgs(options: YoutubePlaybackOptions): string[] {
-  return [...buildVolumeArg(options), ...buildAudioDeviceArg(options), '--no-video', '-'];
+  return [
+    ...buildVolumeArg(options),
+    ...buildAudioDeviceArg(options),
+    '--cache=yes',
+    `--demuxer-max-bytes=${MPV_CACHE_MAX_BYTES}`,
+    '--no-video',
+    '-',
+  ];
 }
+
+// С запасом на 10-минутный трек в 480p HLS (~1 Мбит/с ≈ 75 МиБ).
+const MPV_CACHE_MAX_BYTES = '200MiB';
 
 /**
  * Воспроизводит YouTube-видео локально: yt-dlp сам скачивает аудио и
@@ -228,10 +300,204 @@ export function buildMpvStdinArgs(options: YoutubePlaybackOptions): string[] {
  * not a bot" (и связанных ошибок вроде "The page needs to be reloaded") —
  * см. YOUTUBE_PLAYER_CLIENT / YOUTUBE_COOKIES_FROM_BROWSER /
  * YOUTUBE_COOKIES_FILE / YTDLP_PATH в .env.example.
+ *
+ * preloaded — результат preloadYoutubeInfo для этого же видео. Им пользуется
+ * только первая попытка; если она упала (например, 403 на фрагментах),
+ * повторы разбирают видео заново и получают свежие ссылки. Файл с данными
+ * удаляется, когда воспроизведение закончилось.
  */
-export function playYoutubeUrl(videoUrl: string, mpvPath = 'mpv', options: YoutubePlaybackOptions = {}): PlaybackSession {
-  const ytdlpPath = options.ytdlPath || 'yt-dlp';
-  return spawnYtdlpMpvPipeline(ytdlpPath, buildYtdlpAudioArgs(videoUrl, options), mpvPath, buildMpvStdinArgs(options));
+export function playYoutubeUrl(
+  videoUrl: string,
+  mpvPath = 'mpv',
+  options: YoutubePlaybackOptions = {},
+  preloaded?: YoutubeInfoPreload,
+): PlaybackSession {
+  const ytdlpPath = resolveYtdlpPath(options);
+  const ytdlpOptions = withAbsoluteCookiesFile(options);
+  mkdirSync(YTDLP_WORK_DIR, { recursive: true });
+  const spawnAttempt = (infoJsonPath: string | null): PlaybackSession =>
+    spawnYtdlpMpvPipeline(
+      ytdlpPath,
+      buildYtdlpAudioArgs(videoUrl, ytdlpOptions, infoJsonPath ?? undefined),
+      mpvPath,
+      buildMpvStdinArgs(options),
+      YTDLP_WORK_DIR,
+    );
+  if (!preloaded) {
+    return withRetryBeforeAudio(() => spawnAttempt(null), YOUTUBE_PLAYBACK_ATTEMPTS);
+  }
+  const session = startWhenReady(preloaded.infoJsonPath, (infoJsonPath) =>
+    withRetryBeforeAudio((attempt) => spawnAttempt(attempt === 1 ? infoJsonPath : null), YOUTUBE_PLAYBACK_ATTEMPTS),
+  );
+  void session.finished.catch(() => {}).finally(() => preloaded.cancel());
+  return session;
+}
+
+/** Заранее запущенный разбор видео (см. preloadYoutubeInfo). */
+export interface YoutubeInfoPreload {
+  /** Путь к JSON с данными о видео; null — разбор не удался или отменён. */
+  infoJsonPath: Promise<string | null>;
+  /** Остановить разбор, если он ещё идёт, и удалить файл с данными. */
+  cancel: () => void;
+}
+
+/**
+ * Заранее, пока играет предыдущий трек, разбирает YouTube-видео: yt-dlp
+ * читает куки, страницу, несколько клиентов, решает JS-челлендж — это и есть
+ * основная часть задержки в несколько секунд перед началом трека. Результат
+ * сохраняется в JSON-файл, и playYoutubeUrl с ним сразу начинает качать.
+ *
+ * Ничего не скачивает и не занимает канал: только запросы к YouTube, которые
+ * всё равно были бы сделаны при старте трека. Ссылки внутри живут несколько
+ * часов, так что за 15 секунд не протухнут.
+ */
+export function preloadYoutubeInfo(videoUrl: string, options: YoutubePlaybackOptions = {}): YoutubeInfoPreload {
+  mkdirSync(YTDLP_WORK_DIR, { recursive: true });
+  const filePath = path.join(YTDLP_WORK_DIR, `info-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
+  const child = spawn(resolveYtdlpPath(options), buildYtdlpInfoArgs(videoUrl, withAbsoluteCookiesFile(options)), {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    cwd: YTDLP_WORK_DIR,
+  });
+  let cancelled = false;
+  const stdout: Buffer[] = [];
+  let stderr = '';
+  child.stdout?.on('data', (chunk: Buffer) => stdout.push(chunk));
+  child.stderr?.on('data', (chunk: Buffer) => {
+    stderr = (stderr + chunk.toString('utf8')).slice(-MAX_CAPTURED_OUTPUT);
+  });
+
+  const infoJsonPath = new Promise<string | null>((resolve) => {
+    child.on('error', (err) => {
+      logger.warn('playback', `Не удалось заранее разобрать ${videoUrl} — трек запустится как обычно: ${err.message}`);
+      resolve(null);
+    });
+    child.on('exit', (code) => {
+      if (cancelled) return resolve(null);
+      if (code !== 0) {
+        logger.warn(
+          'playback',
+          `Не удалось заранее разобрать ${videoUrl} (код ${code}) — трек запустится как обычно\n${stderr.trim()}`,
+        );
+        return resolve(null);
+      }
+      try {
+        writeFileSync(filePath, Buffer.concat(stdout));
+        resolve(filePath);
+      } catch (err) {
+        logger.warn('playback', `Не удалось сохранить данные о ${videoUrl}: ${String(err)}`);
+        resolve(null);
+      }
+    });
+  });
+
+  return {
+    infoJsonPath,
+    cancel: () => {
+      cancelled = true;
+      if (child.exitCode === null) killProcess(child);
+      void infoJsonPath.then((p) => {
+        if (p) rmSync(p, { force: true });
+      });
+    },
+  };
+}
+
+/**
+ * Сессия, которая запускается, когда готов ready: до этого stop() просто
+ * отменяет запуск, а audioStarted ждёт сессию, которую вернёт start.
+ */
+function startWhenReady<T>(ready: Promise<T>, start: (value: T) => PlaybackSession): PlaybackSession {
+  let stopped = false;
+  let inner: PlaybackSession | undefined;
+  let resolveAudioStarted!: () => void;
+  const audioStarted = new Promise<void>((resolve) => {
+    resolveAudioStarted = resolve;
+  });
+  const finished = ready.then((value) => {
+    if (stopped) return;
+    inner = start(value);
+    void inner.audioStarted?.then(resolveAudioStarted);
+    return inner.finished;
+  });
+  return {
+    finished,
+    stop: () => {
+      stopped = true;
+      inner?.stop();
+    },
+    audioStarted,
+  };
+}
+
+/**
+ * yt-dlp запускается из временной папки (см. YTDLP_WORK_DIR), поэтому
+ * относительные пути из .env заранее делаются абсолютными. Голое имя
+ * ("yt-dlp") не трогаем — его ищут по PATH.
+ */
+function resolveYtdlpPath(options: YoutubePlaybackOptions): string {
+  return options.ytdlPath ? resolveIfRelativePath(options.ytdlPath) : 'yt-dlp';
+}
+
+function withAbsoluteCookiesFile(options: YoutubePlaybackOptions): YoutubePlaybackOptions {
+  return options.cookiesFile ? { ...options, cookiesFile: path.resolve(options.cookiesFile) } : options;
+}
+
+/**
+ * Рабочая папка процесса yt-dlp. При выводе в stdout он кладёт HLS-фрагменты
+ * в ТЕКУЩУЮ папку (файлы вида "--Frag12", --paths temp: на них не влияет), и
+ * если загрузку оборвать (скип, ошибка фрагмента), они там и остаются —
+ * раньше это был корень проекта.
+ */
+const YTDLP_WORK_DIR = path.join(os.tmpdir(), 'stream-companion-ytdlp');
+
+function resolveIfRelativePath(command: string): string {
+  return command.includes('/') || command.includes('\\') ? path.resolve(command) : command;
+}
+
+const YOUTUBE_PLAYBACK_ATTEMPTS = 3;
+
+/**
+ * Перезапускает сессию, если она упала, так и не начав играть звук.
+ * YouTube периодически отдаёт ссылки, на которых все фрагменты отвечают
+ * 403, а повторный запрос того же видео через секунду проходит. Если звук
+ * уже пошёл (audioStarted), повтор не делается — иначе трек начался бы
+ * заново с начала. Сессии без audioStarted не повторяются вообще.
+ * Экспортировано отдельно ради юнит-тестов.
+ */
+export function withRetryBeforeAudio(start: (attempt: number) => PlaybackSession, attempts: number): PlaybackSession {
+  let stopped = false;
+  let current: PlaybackSession;
+  let resolveAudioStarted!: () => void;
+  const audioStarted = new Promise<void>((resolve) => {
+    resolveAudioStarted = resolve;
+  });
+
+  const run = async (attempt: number): Promise<void> => {
+    current = start(attempt);
+    let started = false;
+    void current.audioStarted?.then(() => {
+      started = true;
+      resolveAudioStarted();
+    });
+    try {
+      await current.finished;
+    } catch (err) {
+      if (stopped || started || !current.audioStarted || attempt >= attempts) throw err;
+      return run(attempt + 1);
+    }
+  };
+
+  // run() синхронно вызывает start() до первого await, так что current
+  // гарантированно задан к моменту, когда кто-то сможет вызвать stop().
+  const finished = run(1);
+  return {
+    finished,
+    stop: () => {
+      stopped = true;
+      current.stop();
+    },
+    audioStarted,
+  };
 }
 
 /**
@@ -246,8 +512,9 @@ export function spawnYtdlpMpvPipeline(
   ytdlpArgs: string[],
   mpvPath: string,
   mpvArgs: string[],
+  ytdlpCwd?: string,
 ): PlaybackSession {
-  const ytdlp = spawn(ytdlpPath, ytdlpArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+  const ytdlp = spawn(ytdlpPath, ytdlpArgs, { stdio: ['ignore', 'pipe', 'pipe'], cwd: ytdlpCwd });
   const mpv = spawn(mpvPath, mpvArgs, { stdio: [ytdlp.stdout, 'pipe', 'pipe'] });
 
   let stopped = false;

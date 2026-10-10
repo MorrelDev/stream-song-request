@@ -15,6 +15,12 @@ export interface SpotifyPlaybackLike extends SpotifyPlayerApi {
 /** Плеер mpv: YouTube-ссылки и yandex:track:<id> (см. index.ts). */
 export interface YoutubePlayerLike {
   play(url: string): { finished: Promise<void>; stop: () => void };
+  /**
+   * Подсказка: этот трек, скорее всего, заиграет следующим — можно заранее
+   * подготовиться (см. preloadYoutubeInfo). Если следующим заиграет другое,
+   * play() просто не воспользуется заготовкой.
+   */
+  prepare?(url: string): void;
 }
 
 /** Очередь заказов (db/musicQueue.ts). */
@@ -63,6 +69,8 @@ export function shuffled<T>(items: T[], random: () => number = Math.random): T[]
 }
 
 const DEFAULT_REIMPORT_RETRY_MS = 60_000;
+/** За сколько до конца mpv-трека готовить следующий — как PREPARE_NEXT_LEAD_MS у Spotify. */
+const MPV_PREPARE_NEXT_LEAD_MS = 15_000;
 
 /**
  * Воспроизведение музыки: две очереди в базе и один цикл.
@@ -248,7 +256,11 @@ export class PlaybackOrchestrator {
     // Уже есть закреплённый трек (например, дефолтный, ждущий снятия !pr) — второй не ставим.
     if (!this.spotify || this.stopped || this.queuedNext) return false;
     const next = this.peekNext(current.kind === 'default' ? current.track.id : undefined);
-    if (!next || next.track.provider !== 'spotify') return false;
+    if (!next) return false;
+    if (next.track.provider !== 'spotify') {
+      this.mpv.prepare?.(next.track.playUri);
+      return false;
+    }
     try {
       await this.spotify.queueTrack(next.track.playUri);
     } catch (err) {
@@ -258,6 +270,13 @@ export class PlaybackOrchestrator {
     this.queuedNext = next;
     logger.info('playback', `Следующий трек заранее поставлен в очередь Spotify: "${next.track.title}"`);
     return true;
+  }
+
+  /** Незадолго до конца mpv-трека: если следующий трек тоже играет mpv — подготовить его. */
+  private prepareNextMpvTrack(current: Item): void {
+    if (this.stopped || this.queuedNext) return;
+    const next = this.peekNext(current.kind === 'default' ? current.track.id : undefined);
+    if (next && next.track.provider !== 'spotify') this.mpv.prepare?.(next.track.playUri);
   }
 
   private shouldReimport(): boolean {
@@ -298,6 +317,7 @@ export class PlaybackOrchestrator {
     );
 
     let ok = true;
+    let prepareTimer: ReturnType<typeof setTimeout> | undefined;
     try {
       let session: { finished: Promise<void>; stop: () => void };
       if (track.provider === 'spotify') {
@@ -311,6 +331,14 @@ export class PlaybackOrchestrator {
       } else {
         await this.silenceSpotify();
         session = this.mpv.play(track.playUri);
+        // У mpv нет prepareNext, как у плеера Spotify, — следующий трек
+        // готовим по таймеру от заявленной длительности трека. Отсчёт идёт с
+        // запуска, а звук начинается на пару секунд позже, так что на деле
+        // это чуть раньше, чем за MPV_PREPARE_NEXT_LEAD_MS до конца.
+        if (track.durationSec > 0) {
+          const delayMs = Math.max(0, track.durationSec * 1000 - MPV_PREPARE_NEXT_LEAD_MS);
+          prepareTimer = setTimeout(() => this.prepareNextMpvTrack(item), delayMs);
+        }
       }
       this.current.stop = session.stop;
       // Скип/остановка могли прийти, пока запускали трек.
@@ -320,6 +348,7 @@ export class PlaybackOrchestrator {
       ok = false;
       logger.error('playback', `Ошибка воспроизведения "${track.title}" — перехожу к следующему треку`, err);
     }
+    clearTimeout(prepareTimer);
 
     const halted = this.haltRequested;
     this.haltRequested = false;
