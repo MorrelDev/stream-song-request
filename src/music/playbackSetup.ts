@@ -2,7 +2,12 @@ import { config } from '../core/config.ts';
 import { logger } from '../core/logger.ts';
 import { createSpotifyUserTokenStore } from './spotifyAuth.ts';
 import { SpotifyPlaybackController } from './spotifyProvider.ts';
-import { playYoutubeUrl } from './youtubePlayer.ts';
+import {
+  playYoutubeUrl,
+  preloadYoutubeInfo,
+  type YoutubeInfoPreload,
+  type YoutubePlaybackOptions,
+} from './youtubePlayer.ts';
 import { playYandexTrack } from './yandexPlayer.ts';
 import { parseYandexPlayUri, resolveYandexPlayback } from './yandexMusicProvider.ts';
 import { fetchYandexPlaylistTracks } from './yandexPlaylist.ts';
@@ -36,8 +41,38 @@ export function createSpotifyController(): SpotifyPlaybackController | null {
  * как yandex:track:<id>, остальное — ссылки на YouTube.
  */
 export function createMpvPlayer(): YoutubePlayerLike {
+  const youtubeOptions = (): YoutubePlaybackOptions => ({
+    playerClient: config.youtube.playerClient,
+    cookiesFromBrowser: config.youtube.cookiesFromBrowser,
+    cookiesFile: config.youtube.cookiesFile,
+    ytdlPath: config.youtube.ytdlPath,
+    forceIpv4: config.youtube.forceIpv4,
+    volume: config.youtube.volume,
+    audioDevice: config.youtube.audioDevice,
+  });
+
+  // Заранее разобранный следующий YouTube-трек (см. prepare). Привязан к
+  // ссылке: если следующим заиграло другое (пришёл заказ, скип), заготовка
+  // просто выбрасывается — сыграть не тот трек из-за неё нельзя.
+  let preload: { url: string; createdAt: number; preload: YoutubeInfoPreload } | null = null;
+  const takePreload = (url: string): YoutubeInfoPreload | undefined => {
+    const current = preload;
+    preload = null;
+    if (current && current.url === url && Date.now() - current.createdAt < PRELOAD_MAX_AGE_MS) return current.preload;
+    current?.preload.cancel();
+    return undefined;
+  };
+
   return {
+    prepare: (url) => {
+      if (parseYandexPlayUri(url) !== null) return;
+      if (preload?.url === url) return;
+      preload?.preload.cancel();
+      logger.info('playback', `Заранее разбираю следующий YouTube-трек: ${url}`);
+      preload = { url, createdAt: Date.now(), preload: preloadYoutubeInfo(url, youtubeOptions()) };
+    },
     play: (url) => {
+      const preloaded = takePreload(url);
       const yandexTrackId = parseYandexPlayUri(url);
       if (yandexTrackId !== null) {
         const token = config.yandexMusic?.token;
@@ -54,18 +89,13 @@ export function createMpvPlayer(): YoutubePlayerLike {
           audioDevice: config.youtube.audioDevice,
         });
       }
-      return playYoutubeUrl(url, config.mpvPath, {
-        playerClient: config.youtube.playerClient,
-        cookiesFromBrowser: config.youtube.cookiesFromBrowser,
-        cookiesFile: config.youtube.cookiesFile,
-        ytdlPath: config.youtube.ytdlPath,
-        forceIpv4: config.youtube.forceIpv4,
-        volume: config.youtube.volume,
-        audioDevice: config.youtube.audioDevice,
-      });
+      return playYoutubeUrl(url, config.mpvPath, youtubeOptions(), preloaded);
     },
   };
 }
+
+/** Ссылки на форматы YouTube живут часы; старше этого заготовку не используем. */
+const PRELOAD_MAX_AGE_MS = 30 * 60_000;
 
 /**
  * Откуда брать треки для таблицы дефолтного плейлиста. config.ts гарантирует,
