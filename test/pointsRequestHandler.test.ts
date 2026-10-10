@@ -37,7 +37,7 @@ function makeRedemption(overrides: Partial<RewardRedeemedEvent> = {}): RewardRed
   };
 }
 
-function makeCfg(opts: { failStatusUpdate?: boolean } = {}): {
+function makeCfg(opts: { failStatusUpdate?: boolean; isPrivileged?: (userId: string) => Promise<boolean> } = {}): {
   cfg: PointsRequestHandlerConfig;
   statuses: Array<{ id: string; status: RedemptionStatus }>;
 } {
@@ -50,6 +50,7 @@ function makeCfg(opts: { failStatusUpdate?: boolean } = {}): {
         if (opts.failStatusUpdate) throw new Error('Twitch недоступен');
         statuses.push({ id: redemption.redemptionId, status });
       },
+      isPrivileged: opts.isPrivileged,
     },
   };
 }
@@ -184,6 +185,101 @@ test('не удалось сменить статус в Twitch — в чате 
   try {
     await handleRedemption(makeRedemption({ userInput: 'включи битлз' }), cfg, fakeFetch({ followedDaysAgo: 10 }));
     assert.match(replies[0], /стример вернёт их вручную/);
+  } finally {
+    unsubscribe();
+  }
+});
+
+test('Privilege-режим: заказ модератора/VIP встаёт в очередь, но активация отклоняется — баллы возвращаются', async () => {
+  const { replies, unsubscribe } = collectReplies();
+  const checked: string[] = [];
+  const { cfg, statuses } = makeCfg({
+    isPrivileged: async (userId) => {
+      checked.push(userId);
+      return true;
+    },
+  });
+  try {
+    await handleRedemption(makeRedemption(), cfg, fakeFetch({ followedDaysAgo: 10, youtubeDurationIso: 'PT3M0S' }));
+    assert.deepEqual(checked, ['viewer-1']);
+    assert.deepEqual(statuses, [{ id: 'red-1', status: 'CANCELED' }]);
+    assert.equal(peekNextPending()?.requestedById, 'viewer-1');
+    assert.match(replies[0], /@Viewer1 трек добавлен в очередь.*Cool video.*позиция 1/s);
+  } finally {
+    unsubscribe();
+  }
+});
+
+test('Privilege-режим: обычный зритель платит как раньше (FULFILLED)', async () => {
+  const { replies, unsubscribe } = collectReplies();
+  const { cfg, statuses } = makeCfg({ isPrivileged: async () => false });
+  try {
+    await handleRedemption(makeRedemption(), cfg, fakeFetch({ followedDaysAgo: 10, youtubeDurationIso: 'PT3M0S' }));
+    assert.deepEqual(statuses, [{ id: 'red-1', status: 'FULFILLED' }]);
+    assert.match(replies[0], /трек добавлен в очередь/);
+  } finally {
+    unsubscribe();
+  }
+});
+
+test('Privilege-режим: стример бесплатно без запроса к Twitch', async () => {
+  const { unsubscribe } = collectReplies();
+  const { cfg, statuses } = makeCfg({
+    isPrivileged: async () => {
+      throw new Error('для стримера проверка роли не нужна');
+    },
+  });
+  try {
+    await handleRedemption(
+      makeRedemption({ userId: 'broadcaster-1' }),
+      cfg,
+      fakeFetch({ followedDaysAgo: 10, youtubeDurationIso: 'PT3M0S' }),
+    );
+    assert.deepEqual(statuses, [{ id: 'red-1', status: 'CANCELED' }]);
+    assert.ok(peekNextPending());
+  } finally {
+    unsubscribe();
+  }
+});
+
+test('Privilege-режим: роль узнать не удалось — заказ платный (FULFILLED), трек в очереди', async () => {
+  const { unsubscribe } = collectReplies();
+  const { cfg, statuses } = makeCfg({
+    isPrivileged: async () => {
+      throw new Error('Twitch недоступен');
+    },
+  });
+  try {
+    await handleRedemption(makeRedemption(), cfg, fakeFetch({ followedDaysAgo: 10, youtubeDurationIso: 'PT3M0S' }));
+    assert.deepEqual(statuses, [{ id: 'red-1', status: 'FULFILLED' }]);
+    assert.ok(peekNextPending());
+  } finally {
+    unsubscribe();
+  }
+});
+
+test('Privilege-режим: отказ модератору — роль не проверяется, CANCELED как обычно', async () => {
+  const { replies, unsubscribe } = collectReplies();
+  const { cfg, statuses } = makeCfg({
+    isPrivileged: async () => {
+      throw new Error('при отказе проверка роли не нужна');
+    },
+  });
+  try {
+    await handleRedemption(makeRedemption({ userInput: 'включи битлз' }), cfg, fakeFetch({ followedDaysAgo: 10 }));
+    assert.deepEqual(statuses, [{ id: 'red-1', status: 'CANCELED' }]);
+    assert.equal(replies[0], '@Viewer1 ссылка невалидная — принимаются ссылки на YouTube');
+  } finally {
+    unsubscribe();
+  }
+});
+
+test('Privilege-режим: не удалось вернуть баллы модератору — в чате сказано, что вернут вручную', async () => {
+  const { replies, unsubscribe } = collectReplies();
+  const { cfg } = makeCfg({ failStatusUpdate: true, isPrivileged: async () => true });
+  try {
+    await handleRedemption(makeRedemption(), cfg, fakeFetch({ followedDaysAgo: 10, youtubeDurationIso: 'PT3M0S' }));
+    assert.match(replies[0], /трек добавлен в очередь.*стример вернёт их вручную/s);
   } finally {
     unsubscribe();
   }

@@ -74,6 +74,14 @@ if (requestModeRaw !== 'command' && requestModeRaw !== 'points') {
 }
 const requestMode: 'command' | 'points' = requestModeRaw;
 
+// Privilege-режим (только для MUSIC_REQUEST_MODE=points): заказы стримера,
+// модераторов и VIP бесплатны — см. MUSIC_PRIVILEGE_MODE в .env.example.
+const privilegeModeRaw = (process.env.MUSIC_PRIVILEGE_MODE ?? 'false').trim().toLowerCase();
+if (privilegeModeRaw !== 'true' && privilegeModeRaw !== 'false') {
+  throw new Error(`MUSIC_PRIVILEGE_MODE должен быть "true" или "false", а задано "${process.env.MUSIC_PRIVILEGE_MODE}".`);
+}
+const privilegeMode = privilegeModeRaw === 'true';
+
 const rewardCost = Number(process.env.MUSIC_REWARD_COST ?? 500);
 if (!Number.isInteger(rewardCost) || rewardCost < 1) {
   throw new Error(`MUSIC_REWARD_COST должен быть целым числом баллов от 1, а задано "${process.env.MUSIC_REWARD_COST}".`);
@@ -211,6 +219,7 @@ export const config = {
   // pointsMode.ts. Правила заказа те же, что у команды.
   points: {
     requestMode,
+    privilegeMode,
     // Токен именно стримера (не бота) со скоупом channel:manage:redemptions —
     // отдельный от чат-токена, см. npm run auth:twitch-points.
     tokenFilePath: process.env.TWITCH_BROADCASTER_TOKEN_FILE ?? './data/twitch-broadcaster-token.json',

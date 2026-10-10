@@ -4,8 +4,10 @@ import { getSetting, setSetting } from '../db/settings.ts';
 import {
   ensureReward,
   findManageableReward,
-  getTokenOwnerId,
+  getTokenInfo,
+  isModeratorOrVip,
   listUnfulfilledRedemptions,
+  PRIVILEGE_SCOPES,
   updateRedemptionStatus,
   updateReward,
   type ChannelPointsApiConfig,
@@ -25,6 +27,8 @@ export interface PointsModeConfig {
   /** Название/цена/подсказка — только для создания награды, существующую не меняют. */
   reward: RewardSettings;
   request: RequestHandlerConfig;
+  /** Privilege-режим: заказы стримера, модераторов и VIP бесплатны (баллы возвращаются). */
+  privilegeMode: boolean;
 }
 
 export interface PointsModeHandle {
@@ -45,13 +49,29 @@ export interface PointsModeHandle {
  *  4. подписывается на новые активации через EventSub.
  */
 export async function startPointsRequestMode(cfg: PointsModeConfig, fetchImpl: typeof fetch = fetch): Promise<PointsModeHandle> {
-  const ownerId = await getTokenOwnerId(await cfg.api.getAccessToken(), fetchImpl);
-  if (ownerId !== cfg.api.broadcasterId) {
+  const token = await getTokenInfo(await cfg.api.getAccessToken(), fetchImpl);
+  if (token.userId !== cfg.api.broadcasterId) {
     throw new Error(
-      `Токен для баллов канала выдан не стримером (id ${ownerId}, а нужен TWITCH_BROADCASTER_ID=${cfg.api.broadcasterId}). ` +
+      `Токен для баллов канала выдан не стримером (id ${token.userId}, а нужен TWITCH_BROADCASTER_ID=${cfg.api.broadcasterId}). ` +
         'Twitch даёт управлять наградами только самому стримеру — пройди "npm run auth:twitch-points" ещё раз, ' +
         'залогинившись в браузере аккаунтом канала.',
     );
+  }
+
+  // Без скоупов на списки модераторов/VIP Privilege-режим не работает — но
+  // это не повод отключать заказы за баллы целиком: просто все платят.
+  let privilegeMode = cfg.privilegeMode;
+  const missingScopes = PRIVILEGE_SCOPES.filter((s) => !token.scopes.includes(s));
+  if (privilegeMode && missingScopes.length > 0) {
+    privilegeMode = false;
+    logger.error(
+      'music',
+      `MUSIC_PRIVILEGE_MODE включён, но у токена стримера нет скоупов ${missingScopes.join(', ')} — ` +
+        'Privilege-режим выключен, модераторы и VIP платят баллами, как все. Пройди "npm run auth:twitch-points" ' +
+        'ещё раз (аккаунтом канала) и перезапусти приложение.',
+    );
+  } else if (privilegeMode) {
+    logger.info('music', 'Privilege-режим: заказы стримера, модераторов и VIP бесплатны — баллы возвращаются');
   }
 
   const reward = await ensureReward(cfg.api, cfg.reward, getSetting(REWARD_ID_SETTING), fetchImpl);
@@ -97,6 +117,7 @@ export async function startPointsRequestMode(cfg: PointsModeConfig, fetchImpl: t
       request: cfg.request,
       setRedemptionStatus: (redemption, status) =>
         updateRedemptionStatus(cfg.api, redemption.rewardId, [redemption.redemptionId], status, fetchImpl),
+      isPrivileged: privilegeMode ? (userId) => isModeratorOrVip(cfg.api, userId, fetchImpl) : undefined,
     },
     fetchImpl,
   );

@@ -105,6 +105,7 @@ if (isPointsMode) {
       api: channelPointsApi,
       reward: { title: config.points.rewardTitle, cost: config.points.rewardCost, prompt: config.points.rewardPrompt },
       request: requestCfg,
+      privilegeMode: config.points.privilegeMode,
     })
       .then((handle) => {
         pointsMode = handle;
