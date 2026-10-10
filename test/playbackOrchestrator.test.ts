@@ -22,8 +22,13 @@ beforeEach(() => {
 class FakeMpv implements YoutubePlayerLike {
   played: string[] = [];
   stopped: string[] = [];
+  prepared: string[] = [];
   failNext = false;
   private finishers: Array<() => void> = [];
+
+  prepare(url: string): void {
+    this.prepared.push(url);
+  }
 
   play(url: string): { finished: Promise<void>; stop: () => void } {
     this.played.push(url);
@@ -476,6 +481,42 @@ test('Spotify-заказ без настроенного Spotify — пропу�
     requests.add('youtube', 'https://yt/after');
     await until(() => mpv.played.length === 1, 'следующий заказ');
     assert.deepEqual(requests.statuses(), ['spotify:track:x:done', 'https://yt/after:playing']);
+  } finally {
+    orchestrator.stop();
+    await done;
+  }
+});
+
+test('незадолго до конца mpv-трека следующий mpv-трек готовится заранее (prepare)', async () => {
+  // durationSec меньше 15 с — таймер подготовки срабатывает сразу.
+  const short = (n: number): NewDefaultTrack => ({ ...def(n), durationSec: 5 });
+  const { mpv, requests, orchestrator, done } = setup({ playlist: [short(1), short(2)] });
+  try {
+    await until(() => mpv.played.length === 1, 'первый трек');
+    await until(() => mpv.prepared.length === 1, 'подготовка следующего');
+    assert.deepEqual(mpv.prepared, ['yandex:track:2']);
+
+    // Пришёл заказ — теперь следующим будет он; по таймеру следующего трека готовится уже заказ.
+    requests.add('youtube', 'https://yt/a');
+    mpv.finish();
+    await until(() => mpv.played.length === 2, 'заказ');
+    assert.equal(mpv.played[1], 'https://yt/a');
+  } finally {
+    orchestrator.stop();
+    await done;
+  }
+});
+
+test('Spotify-трек, следующий — YouTube: YouTube готовится заранее, в очередь Spotify ничего не ставится', async () => {
+  const spotify = new FakeSpotify();
+  const { mpv, requests, orchestrator, done } = setup({ noPlaylist: true, spotify });
+  try {
+    requests.add('spotify', 'spotify:track:x');
+    requests.add('youtube', 'https://yt/next');
+    await until(() => mpv.prepared.length === 1, 'подготовка YouTube');
+    assert.deepEqual(mpv.prepared, ['https://yt/next']);
+    await until(() => mpv.played.length === 1, 'YouTube после Spotify');
+    assert.ok(!spotify.calls.some((c) => c.startsWith('queue')));
   } finally {
     orchestrator.stop();
     await done;

@@ -4,11 +4,65 @@ import {
   spawnPlaybackProcess,
   spawnYtdlpMpvPipeline,
   buildYtdlpAudioArgs,
+  buildYtdlpInfoArgs,
   buildVolumeArg,
   buildAudioDeviceArg,
   buildMpvStdinArgs,
   playYoutubeUrl,
+  withRetryBeforeAudio,
+  type PlaybackSession,
 } from '../src/music/youtubePlayer.ts';
+
+/** Фейковая сессия для тестов withRetryBeforeAudio. */
+function fakeSession(opts: { fail: boolean; audio: boolean }): PlaybackSession & { stopped: boolean } {
+  const session = {
+    stopped: false,
+    finished: opts.fail ? Promise.reject(new Error('403')) : Promise.resolve(),
+    stop: () => {
+      session.stopped = true;
+    },
+    audioStarted: opts.audio ? Promise.resolve() : new Promise<void>(() => {}),
+  };
+  session.finished.catch(() => {});
+  return session;
+}
+
+test('withRetryBeforeAudio: повторяет, если звук не пошёл, и успевает со второй попытки', async () => {
+  const results = [{ fail: true, audio: false }, { fail: false, audio: true }];
+  let calls = 0;
+  const session = withRetryBeforeAudio(() => fakeSession(results[calls++]), 3);
+  await session.finished;
+  await session.audioStarted;
+  assert.equal(calls, 2);
+});
+
+test('withRetryBeforeAudio: после исчерпания попыток пробрасывает последнюю ошибку', async () => {
+  let calls = 0;
+  const session = withRetryBeforeAudio(() => {
+    calls++;
+    return fakeSession({ fail: true, audio: false });
+  }, 3);
+  await assert.rejects(() => session.finished, /403/);
+  assert.equal(calls, 3);
+});
+
+test('withRetryBeforeAudio: не повторяет, если звук уже начал играть', async () => {
+  let calls = 0;
+  const session = withRetryBeforeAudio(() => {
+    calls++;
+    return fakeSession({ fail: true, audio: true });
+  }, 3);
+  await assert.rejects(() => session.finished, /403/);
+  assert.equal(calls, 1);
+});
+
+test('withRetryBeforeAudio: stop() останавливает текущую попытку', async () => {
+  const inner = fakeSession({ fail: false, audio: false });
+  const session = withRetryBeforeAudio(() => inner, 3);
+  session.stop();
+  await session.finished;
+  assert.equal(inner.stopped, true);
+});
 
 // Вместо реального mpv/yt-dlp используем сам node с коротким скриптом — это
 // позволяет протестировать логику обёртки (успех/ошибка/stop) без
@@ -41,10 +95,32 @@ test('finished при ошибке прикладывает вывод проц�
 test('buildYtdlpAudioArgs: без опций — только формат/вывод в stdout и сама ссылка', () => {
   assert.deepEqual(buildYtdlpAudioArgs('https://youtu.be/xyz', {}), [
     '-f',
-    'bestaudio',
+    'bestaudio/best[height<=480]/best',
     '--no-playlist',
+    '--concurrent-fragments',
+    '4',
+    '--fragment-retries',
+    '3',
+    '--abort-on-unavailable-fragments',
     '-o',
     '-',
+    'https://youtu.be/xyz',
+  ]);
+});
+
+test('buildYtdlpAudioArgs: с заранее разобранными данными вместо ссылки — --load-info-json', () => {
+  const args = buildYtdlpAudioArgs('https://youtu.be/xyz', { cookiesFromBrowser: 'firefox' }, '/tmp/info.json');
+  assert.deepEqual(args.slice(-4), ['--cookies-from-browser', 'firefox', '--load-info-json', '/tmp/info.json']);
+  assert.ok(!args.includes('https://youtu.be/xyz'));
+});
+
+test('buildYtdlpInfoArgs: только разбор в JSON, с теми же куками/клиентом', () => {
+  assert.deepEqual(buildYtdlpInfoArgs('https://youtu.be/xyz', { playerClient: 'tv', forceIpv4: true }), [
+    '--dump-json',
+    '--no-playlist',
+    '--extractor-args',
+    'youtube:player_client=tv',
+    '--force-ipv4',
     'https://youtu.be/xyz',
   ]);
 });
@@ -113,14 +189,16 @@ test('buildAudioDeviceArg: с audioDevice — "--audio-device=<значение>
   assert.deepEqual(buildAudioDeviceArg({ audioDevice: 'wasapi/{abc-123}' }), ['--audio-device=wasapi/{abc-123}']);
 });
 
-test('buildMpvStdinArgs: без опций — только --no-video и "-" (чтение из stdin)', () => {
-  assert.deepEqual(buildMpvStdinArgs({}), ['--no-video', '-']);
+test('buildMpvStdinArgs: без опций — кэш, --no-video и "-" (чтение из stdin)', () => {
+  assert.deepEqual(buildMpvStdinArgs({}), ['--cache=yes', '--demuxer-max-bytes=200MiB', '--no-video', '-']);
 });
 
-test('buildMpvStdinArgs: volume/audioDevice добавляются перед --no-video/"-"', () => {
+test('buildMpvStdinArgs: volume/audioDevice добавляются перед кэшем, --no-video и "-"', () => {
   assert.deepEqual(buildMpvStdinArgs({ volume: 25, audioDevice: 'wasapi/{abc}' }), [
     '--volume=25',
     '--audio-device=wasapi/{abc}',
+    '--cache=yes',
+    '--demuxer-max-bytes=200MiB',
     '--no-video',
     '-',
   ]);

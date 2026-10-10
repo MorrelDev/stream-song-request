@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   ensureReward,
-  getTokenOwnerId,
+  getTokenInfo,
+  isModeratorOrVip,
   listUnfulfilledRedemptions,
   updateRedemptionStatus,
   type ChannelPointsApiConfig,
@@ -38,10 +39,37 @@ function recordingFetch(respond: (req: RecordedRequest) => Response): { fetchImp
 
 const json = (data: unknown, status = 200): Response => new Response(JSON.stringify(data), { status });
 
-test('getTokenOwnerId возвращает user_id владельца токена', async () => {
-  const { fetchImpl, requests } = recordingFetch(() => json({ user_id: '42', scopes: [] }));
-  assert.equal(await getTokenOwnerId('tok', fetchImpl), '42');
+test('getTokenInfo возвращает владельца токена и скоупы', async () => {
+  const { fetchImpl, requests } = recordingFetch(() => json({ user_id: '42', scopes: ['moderation:read'] }));
+  assert.deepEqual(await getTokenInfo('tok', fetchImpl), { userId: '42', scopes: ['moderation:read'] });
   assert.equal(requests[0].headers.Authorization, 'OAuth tok');
+});
+
+test('isModeratorOrVip: модератор — true, до списка VIP не доходит', async () => {
+  const { fetchImpl, requests } = recordingFetch(() => json({ data: [{ user_id: 'u-1' }] }));
+  assert.equal(await isModeratorOrVip(apiCfg, 'u-1', fetchImpl), true);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url.pathname, '/helix/moderation/moderators');
+  assert.equal(requests[0].url.searchParams.get('broadcaster_id'), 'broadcaster-1');
+  assert.equal(requests[0].url.searchParams.get('user_id'), 'u-1');
+  assert.equal(requests[0].headers.Authorization, 'Bearer broadcaster-token');
+});
+
+test('isModeratorOrVip: VIP — true, обычный зритель — false', async () => {
+  const vip = recordingFetch((req) => json({ data: req.url.pathname.endsWith('/channels/vips') ? [{ user_id: 'u-1' }] : [] }));
+  assert.equal(await isModeratorOrVip(apiCfg, 'u-1', vip.fetchImpl), true);
+  assert.deepEqual(
+    vip.requests.map((r) => r.url.pathname),
+    ['/helix/moderation/moderators', '/helix/channels/vips'],
+  );
+
+  const viewer = recordingFetch(() => json({ data: [] }));
+  assert.equal(await isModeratorOrVip(apiCfg, 'u-2', viewer.fetchImpl), false);
+});
+
+test('isModeratorOrVip: ошибка Twitch — исключение', async () => {
+  const { fetchImpl } = recordingFetch(() => json({ message: 'Missing scope' }, 401));
+  await assert.rejects(isModeratorOrVip(apiCfg, 'u-1', fetchImpl), /список модераторов.*HTTP 401/);
 });
 
 const requiredFields = {
