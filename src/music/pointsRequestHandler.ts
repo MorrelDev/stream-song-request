@@ -8,6 +8,11 @@ export interface PointsRequestHandlerConfig {
   request: RequestHandlerConfig;
   /** Выполнить (FULFILLED) или отклонить с возвратом баллов (CANCELED) активацию в Twitch. */
   setRedemptionStatus: (redemption: RewardRedeemedEvent, status: RedemptionStatus) => Promise<void>;
+  /**
+   * Privilege-режим (MUSIC_PRIVILEGE_MODE): true — пользователь модератор
+   * или VIP, и его заказ принимается бесплатно. Не задано — режим выключен.
+   */
+  isPrivileged?: (userId: string) => Promise<boolean>;
 }
 
 function reply(text: string): void {
@@ -29,6 +34,9 @@ export function registerPointsRequestHandler(cfg: PointsRequestHandlerConfig, fe
  * может заказывать любой зритель. Трек встал в очередь — активация
  * выполнена; не встал по любой причине (включая непредвиденную ошибку) —
  * активация отклоняется, и Twitch сам возвращает зрителю баллы.
+ *
+ * В Privilege-режиме заказ стримера, модератора или VIP, вставший в очередь,
+ * тоже отклоняется — трек остаётся в очереди, а баллы возвращаются.
  */
 export async function handleRedemption(
   redemption: RewardRedeemedEvent,
@@ -62,7 +70,9 @@ export async function handleRedemption(
     };
   }
 
-  const status: RedemptionStatus = outcome.queued ? 'FULFILLED' : 'CANCELED';
+  const free = outcome.queued && (await isFreeRequest(redemption, requester.isBroadcaster, cfg));
+
+  const status: RedemptionStatus = outcome.queued && !free ? 'FULFILLED' : 'CANCELED';
   let statusUpdated = true;
   try {
     await cfg.setRedemptionStatus(redemption, status);
@@ -76,9 +86,33 @@ export async function handleRedemption(
     );
   }
 
-  if (outcome.queued || statusUpdated) {
+  if ((outcome.queued && !free) || statusUpdated) {
     reply(outcome.replyText);
   } else {
     reply(`${outcome.replyText} (баллы не удалось вернуть автоматически — стример вернёт их вручную)`);
+  }
+}
+
+/**
+ * Privilege-режим: заказ бесплатный для стримера, модераторов и VIP. Если
+ * роль узнать не удалось — заказ платный, как у обычного зрителя (трек уже в
+ * очереди, а вернуть баллы стример может и вручную).
+ */
+async function isFreeRequest(
+  redemption: RewardRedeemedEvent,
+  isBroadcaster: boolean,
+  cfg: PointsRequestHandlerConfig,
+): Promise<boolean> {
+  if (!cfg.isPrivileged) return false;
+  if (isBroadcaster) return true;
+  try {
+    return await cfg.isPrivileged(redemption.userId);
+  } catch (err) {
+    logger.error(
+      'music',
+      `Не удалось проверить, модератор или VIP ли ${redemption.userName}, — баллы за заказ списаны как у обычного зрителя`,
+      err,
+    );
+    return false;
   }
 }

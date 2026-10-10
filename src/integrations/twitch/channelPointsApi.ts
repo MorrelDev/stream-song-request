@@ -65,20 +65,57 @@ async function describeError(res: Response): Promise<string> {
   return `HTTP ${res.status}${details ? `: ${details}` : ''}`;
 }
 
+export interface TokenInfo {
+  /** id пользователя, которому принадлежит токен. */
+  userId: string;
+  scopes: string[];
+}
+
 /**
- * Возвращает id пользователя, которому принадлежит токен (GET oauth2/validate) —
- * чтобы при старте сразу поймать частую ошибку "авторизовался не тем
- * аккаунтом" (ботом вместо стримера), а не получать 403 на каждой награде.
+ * Возвращает владельца токена и его скоупы (GET oauth2/validate) — чтобы при
+ * старте сразу поймать частые ошибки "авторизовался не тем аккаунтом"
+ * (ботом вместо стримера) и "токен выдан до появления нужного скоупа", а не
+ * получать 403 на каждом запросе.
  */
-export async function getTokenOwnerId(accessToken: string, fetchImpl: typeof fetch = fetch): Promise<string> {
+export async function getTokenInfo(accessToken: string, fetchImpl: typeof fetch = fetch): Promise<TokenInfo> {
   const res = await fetchImpl('https://id.twitch.tv/oauth2/validate', {
     headers: { Authorization: `OAuth ${accessToken}` },
   });
   if (!res.ok) {
     throw new Error(`Twitch не принял токен стримера (oauth2/validate): ${await describeError(res)}`);
   }
-  const data = (await res.json()) as { user_id: string };
-  return data.user_id;
+  const data = (await res.json()) as { user_id: string; scopes?: string[] };
+  return { userId: data.user_id, scopes: data.scopes ?? [] };
+}
+
+/** Скоупы токена стримера, нужные для isModeratorOrVip (Privilege-режим). */
+export const PRIVILEGE_SCOPES = ['moderation:read', 'channel:read:vips'];
+
+/**
+ * true — пользователь модератор или VIP канала. В событии активации награды
+ * Twitch значков зрителя не присылает, поэтому спрашиваем у Helix (оба
+ * запроса — только с токеном стримера, см. PRIVILEGE_SCOPES).
+ */
+export async function isModeratorOrVip(
+  cfg: ChannelPointsApiConfig,
+  userId: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<boolean> {
+  for (const [path, what] of [
+    ['moderation/moderators', 'модераторов'],
+    ['channels/vips', 'VIP'],
+  ] as const) {
+    const url = new URL(`${HELIX}/${path}`);
+    url.searchParams.set('broadcaster_id', cfg.broadcasterId);
+    url.searchParams.set('user_id', userId);
+    const res = await helixRequest(cfg, 'GET', url, undefined, fetchImpl);
+    if (!res.ok) {
+      throw new Error(`Не удалось получить список ${what} канала: ${await describeError(res)}`);
+    }
+    const data = (await res.json()) as { data: unknown[] };
+    if (data.data.length > 0) return true;
+  }
+  return false;
 }
 
 export interface ManagedReward {

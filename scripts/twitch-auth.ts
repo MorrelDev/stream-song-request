@@ -8,7 +8,8 @@
  * канала, иначе скоуп moderator:read:followers не сработает (Twitch вернёт 401/403).
  *
  * С флагом --broadcaster (npm run auth:twitch-points) — отдельная авторизация
- * для заказа музыки за баллы канала: скоуп channel:manage:redemptions, токен
+ * для заказа музыки за баллы канала: скоуп channel:manage:redemptions (и
+ * moderation:read + channel:read:vips для Privilege-режима), токен
  * сохраняется в TWITCH_BROADCASTER_TOKEN_FILE. Логиниться в браузере нужно
  * именно аккаунтом канала — Twitch даёт управлять наградами только стримеру,
  * даже модератору нельзя. Если бот и есть сам стример — авторизоваться всё
@@ -44,9 +45,12 @@ if (!clientId || !clientSecret) {
   process.exit(1);
 }
 
-const scopes = (forBroadcaster ? ['channel:manage:redemptions'] : ['chat:read', 'chat:edit', 'moderator:read:followers']).join(
-  ' ',
-);
+// moderation:read и channel:read:vips — для Privilege-режима (MUSIC_PRIVILEGE_MODE).
+const scopes = (
+  forBroadcaster
+    ? ['channel:manage:redemptions', 'moderation:read', 'channel:read:vips']
+    : ['chat:read', 'chat:edit', 'moderator:read:followers']
+).join(' ');
 
 if (forBroadcaster) {
   console.log('Авторизация для заказа за баллы канала: в браузере нужно быть залогиненным АККАУНТОМ КАНАЛА (не ботом).');
