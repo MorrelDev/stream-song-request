@@ -66,6 +66,13 @@ const shuffleDefaultPlaylist =
   (process.env.DEFAULT_PLAYLIST_SHUFFLE ?? process.env.YANDEX_DEFAULT_PLAYLIST_SHUFFLE ?? 'true').trim().toLowerCase() !==
   'false';
 
+// Порт оверлея "сейчас играет" (http://localhost:<порт>/overlay). 0 или off — выключен.
+const overlayPortRaw = (process.env.OVERLAY_PORT ?? '8890').trim().toLowerCase();
+const overlayPort = overlayPortRaw === 'off' || overlayPortRaw === '0' ? null : Number(overlayPortRaw);
+if (overlayPort !== null && (!Number.isInteger(overlayPort) || overlayPort < 1 || overlayPort > 65535)) {
+  throw new Error(`OVERLAY_PORT должен быть номером порта (1-65535), 0 или off, а задано "${process.env.OVERLAY_PORT}".`);
+}
+
 // Режим заказа музыки: командой в чате (!sr) или за баллы канала — только
 // один из двух одновременно, см. MUSIC_REQUEST_MODE в .env.example.
 const requestModeRaw = (process.env.MUSIC_REQUEST_MODE ?? 'command').trim().toLowerCase();
@@ -275,4 +282,7 @@ export const config = {
     shuffleDefaultPlaylist,
   },
   mpvPath: process.env.MPV_PATH ?? 'mpv',
+  // Оверлей "сейчас играет" для OBS (см. overlay/nowPlayingOverlay.ts).
+  // null — выключен (OVERLAY_PORT=0 или off).
+  overlay: overlayPort === null ? null : { port: overlayPort },
 } as const;

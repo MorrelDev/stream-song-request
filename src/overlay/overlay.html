@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Сейчас играет</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@500;700;800&display=swap" rel="stylesheet">
+<!--
+  Оверлей "сейчас играет" для OBS: источник "Браузер" с адресом
+  http://localhost:8890/overlay (порт — OVERLAY_PORT в .env), ширина 440, высота 160.
+
+  Параметры в адресе (необязательно, через ?...&...):
+    scale=1.5      — увеличить/уменьшить плашку;
+    requester=0    — не показывать, кто заказал трек;
+    autohide=10    — показывать плашку только 10 секунд после смены трека (0 — всегда).
+-->
+<style>
+  :root {
+    /* Цвета подменяются скриптом под обложку текущего трека. */
+    --accent: hsl(22, 75%, 58%);
+    --panel: hsla(22, 40%, 16%, 0.88);
+    --frame: hsl(36, 60%, 85%);
+    --track: hsla(22, 35%, 10%, 0.85);
+    --scale: 1;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: transparent; overflow: hidden; }
+  body {
+    font-family: 'Montserrat', 'Segoe UI', sans-serif;
+    color: #fff;
+    padding: 10px;
+  }
+
+  .card {
+    width: 420px;
+    transform-origin: top left;
+    scale: var(--scale);
+    transition: opacity .45s ease, translate .45s cubic-bezier(.2, .8, .2, 1);
+  }
+  .card.hidden { opacity: 0; translate: -40px 0; }
+
+  .row { display: flex; gap: 8px; }
+
+  .cover {
+    position: relative;
+    flex: none;
+    width: 112px;
+    height: 112px;
+    border: 3px solid var(--frame);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--panel);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, .45);
+    transition: border-color .8s ease;
+  }
+  .cover img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    opacity: 0;
+    transition: opacity .6s ease;
+  }
+  .cover img.shown { opacity: 1; }
+  .cover .placeholder {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    font-size: 44px;
+    color: var(--accent);
+  }
+
+  .side { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+
+  .panel {
+    background: var(--panel);
+    border-radius: 10px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, .35);
+    transition: background-color .8s ease;
+  }
+
+  .info { flex: 1; padding: 10px 14px; display: flex; flex-direction: column; justify-content: center; min-width: 0; }
+  .line { overflow: hidden; white-space: nowrap; }
+  .line > span { display: inline-block; }
+  .line.marquee { mask-image: linear-gradient(90deg, transparent 0, #000 6px, #000 calc(100% - 14px), transparent 100%); }
+  .line.marquee > span { animation: marquee var(--marquee-time, 8s) ease-in-out infinite alternate; }
+  @keyframes marquee {
+    0%, 15% { transform: translateX(0); }
+    85%, 100% { transform: translateX(var(--marquee-shift, 0)); }
+  }
+  .title { font-size: 19px; font-weight: 800; line-height: 1.25; }
+  .artist { font-size: 13px; font-weight: 500; line-height: 1.4; color: rgba(255, 255, 255, .82); }
+  .artist .requester { color: var(--accent); font-weight: 700; }
+
+  .wave {
+    height: 44px;
+    padding: 0 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+  }
+  .wave .time { flex: none; min-width: 38px; }
+  .wave .time.total { text-align: right; }
+  .bars { flex: 1; height: 26px; display: flex; align-items: center; justify-content: space-between; }
+  .bar {
+    width: 3px;
+    border-radius: 2px;
+    background: var(--accent);
+    opacity: .38;
+    transform-origin: center;
+    transition: opacity .3s ease;
+  }
+  .bar.played { opacity: 1; }
+  .playing .bar { animation: pulse var(--dur) ease-in-out var(--delay) infinite alternate; }
+  @keyframes pulse { from { transform: scaleY(.35); } to { transform: scaleY(1); } }
+
+  .progress {
+    margin-top: 8px;
+    height: 8px;
+    border-radius: 4px;
+    background: var(--track);
+    overflow: hidden;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, .35);
+  }
+  .progress .fill {
+    height: 100%;
+    width: 0;
+    border-radius: 4px;
+    background: var(--accent);
+  }
+  .no-duration .progress, .no-duration .time.total { visibility: hidden; }
+
+  .fade { transition: opacity .3s ease; }
+  .switching .fade { opacity: 0; }
+</style>
+</head>
+<body>
+<div class="card hidden" id="card">
+  <div class="row">
+    <div class="cover">
+      <div class="placeholder">♪</div>
+      <img id="coverA" alt="">
+      <img id="coverB" alt="">
+    </div>
+    <div class="side">
+      <div class="panel info fade">
+        <div class="line title" id="title"><span></span></div>
+        <div class="line artist" id="artist"><span></span></div>
+      </div>
+      <div class="panel wave" id="wave">
+        <span class="time" id="elapsed">0:00</span>
+        <div class="bars" id="bars"></div>
+        <span class="time total" id="total">0:00</span>
+      </div>
+    </div>
+  </div>
+  <div class="progress"><div class="fill" id="fill"></div></div>
+</div>
+
+<script>
+  const params = new URLSearchParams(location.search);
+  const showRequester = params.get('requester') !== '0';
+  const autohideSec = Number(params.get('autohide') ?? 0);
+  document.documentElement.style.setProperty('--scale', String(Number(params.get('scale')) || 1));
+
+  const BAR_COUNT = 30;
+  const DEFAULT_HUE = 22;
+  const $ = (id) => document.getElementById(id);
+  const card = $('card');
+  const barsEl = $('bars');
+  const bars = [];
+  for (let i = 0; i < BAR_COUNT; i++) {
+    const bar = document.createElement('div');
+    bar.className = 'bar';
+    barsEl.appendChild(bar);
+    bars.push(bar);
+  }
+
+  let state = null;          // последний ответ /overlay/state
+  let stateAt = 0;           // когда он получен (performance.now())
+  let currentKey = null;
+  let hideTimer = null;
+  let frontCover = $('coverA');
+  let backCover = $('coverB');
+
+  // --- Высота столбиков "волны": своя для каждого трека, но стабильная ---
+  function seededRandom(seed) {
+    let h = 2166136261;
+    for (const ch of seed) h = Math.imul(h ^ ch.charCodeAt(0), 16777619);
+    return () => {
+      h = Math.imul(h ^ (h >>> 15), 2246822507);
+      h = Math.imul(h ^ (h >>> 13), 3266489909);
+      return ((h ^= h >>> 16) >>> 0) / 4294967296;
+    };
+  }
+  function shapeBars(key) {
+    const rnd = seededRandom(key);
+    bars.forEach((bar, i) => {
+      // Огибающая повыше в середине — похоже на настоящую волну.
+      const envelope = 0.55 + 0.45 * Math.sin(Math.PI * (i + 0.5) / BAR_COUNT);
+      const h = Math.max(0.3, envelope * (0.45 + 0.55 * rnd()));
+      bar.style.height = `${Math.round(h * 100)}%`;
+      bar.style.setProperty('--dur', `${(0.6 + rnd() * 0.7).toFixed(2)}s`);
+      bar.style.setProperty('--delay', `${(-rnd() * 1.2).toFixed(2)}s`);
+    });
+  }
+
+  // --- Цвета под обложку ---
+  function rgbToHsl(r, g, b) {
+    r /= 255; g /= 255; b /= 255;
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    const l = (max + min) / 2;
+    if (max === min) return [0, 0, l];
+    const d = max - min;
+    const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    let h;
+    if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    return [h * 60, s, l];
+  }
+  function pickHue(img) {
+    const size = 48;
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = size;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0, size, size);
+    const { data } = ctx.getImageData(0, 0, size, size);
+    const bins = new Array(36).fill(0);
+    const sat = new Array(36).fill(0);
+    for (let i = 0; i < data.length; i += 4) {
+      const [h, s, l] = rgbToHsl(data[i], data[i + 1], data[i + 2]);
+      if (s < 0.22 || l < 0.12 || l > 0.9) continue; // серое, чёрное, белое — не в счёт
+      const w = s * (1 - Math.abs(l - 0.5) * 1.4);
+      const bin = Math.floor(h / 10) % 36;
+      bins[bin] += w;
+      sat[bin] += s * w;
+    }
+    let best = -1;
+    for (let i = 0; i < 36; i++) if (best < 0 || bins[i] > bins[best]) best = i;
+    if (best < 0 || bins[best] < 1) return null; // почти чёрно-белая обложка
+    // Средний оттенок с учётом соседних корзин — чтобы не прыгал по 10°.
+    const prev = (best + 35) % 36, next = (best + 1) % 36;
+    const total = bins[prev] + bins[best] + bins[next];
+    const hue = (best * 10 + 5) + ((bins[next] - bins[prev]) / total) * 10;
+    return { hue: (hue + 360) % 360, sat: sat[best] / bins[best] };
+  }
+  function applyPalette(color) {
+    const root = document.documentElement.style;
+    if (!color) {
+      // Чёрно-белая обложка или её нет — нейтральная тёплая гамма.
+      root.setProperty('--accent', `hsl(${DEFAULT_HUE}, 75%, 58%)`);
+      root.setProperty('--panel', 'hsla(0, 0%, 12%, 0.88)');
+      root.setProperty('--frame', 'hsl(0, 0%, 88%)');
+      root.setProperty('--track', 'hsla(0, 0%, 8%, 0.85)');
+      return;
+    }
+    const h = Math.round(color.hue);
+    const s = Math.round(Math.min(0.85, Math.max(0.55, color.sat)) * 100);
+    root.setProperty('--accent', `hsl(${h}, ${s}%, 60%)`);
+    root.setProperty('--panel', `hsla(${h}, ${Math.round(s * 0.55)}%, 16%, 0.88)`);
+    root.setProperty('--frame', `hsl(${h}, 55%, 86%)`);
+    root.setProperty('--track', `hsla(${h}, ${Math.round(s * 0.45)}%, 10%, 0.85)`);
+  }
+
+  function setCover(url) {
+    if (!url) {
+      frontCover.classList.remove('shown');
+      applyPalette(null);
+      return;
+    }
+    const img = backCover;
+    img.onload = () => {
+      let color = null;
+      try { color = pickHue(img); } catch { /* без цветов — не страшно */ }
+      applyPalette(color);
+      img.classList.add('shown');
+      frontCover.classList.remove('shown');
+      [frontCover, backCover] = [img, frontCover];
+    };
+    img.onerror = () => {
+      frontCover.classList.remove('shown');
+      applyPalette(null);
+    };
+    img.src = url;
+  }
+
+  // --- Текст: длинное название прокручивается туда-обратно ---
+  function fitLine(el) {
+    const overflow = el.firstElementChild.scrollWidth - el.clientWidth;
+    if (overflow > 4) {
+      el.style.setProperty('--marquee-shift', `${-overflow - 8}px`);
+      el.style.setProperty('--marquee-time', `${Math.max(4, overflow / 25)}s`);
+      el.classList.add('marquee');
+    } else {
+      el.classList.remove('marquee');
+    }
+  }
+  function setLine(el, html) {
+    el.firstElementChild.innerHTML = html;
+    el.classList.remove('marquee');
+    requestAnimationFrame(() => fitLine(el));
+  }
+  // Ширина текста меняется, когда догрузится шрифт, — перемеряем.
+  document.fonts.ready.then(() => { fitLine($('title')); fitLine($('artist')); });
+  document.fonts.addEventListener('loadingdone', () => { fitLine($('title')); fitLine($('artist')); });
+  const escapeHtml = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+  function showCard() {
+    card.classList.remove('hidden');
+    clearTimeout(hideTimer);
+    if (autohideSec > 0) hideTimer = setTimeout(() => card.classList.add('hidden'), autohideSec * 1000);
+  }
+
+  function onNewTrack(s) {
+    currentKey = s.key;
+    card.classList.add('switching');
+    setTimeout(() => {
+      setLine($('title'), escapeHtml(s.title));
+      const requester = showRequester && s.requester
+        ? ` <span class="requester">· заказ от ${escapeHtml(s.requester)}</span>`
+        : '';
+      setLine($('artist'), escapeHtml(s.artist) + requester);
+      $('total').textContent = formatTime(s.durationSec);
+      card.classList.toggle('no-duration', !(s.durationSec > 0));
+      shapeBars(s.key);
+      card.classList.remove('switching');
+    }, card.classList.contains('hidden') ? 0 : 300);
+    setCover(s.coverUrl);
+    showCard();
+  }
+
+  function formatTime(sec) {
+    sec = Math.max(0, Math.floor(sec || 0));
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}` : `${m}:${String(s).padStart(2, '0')}`;
+  }
+
+  async function poll() {
+    try {
+      const res = await fetch('/overlay/state', { cache: 'no-store' });
+      const s = await res.json();
+      state = s;
+      stateAt = performance.now();
+      if (!s.playing) {
+        if (currentKey !== null) {
+          currentKey = null;
+          clearTimeout(hideTimer);
+          card.classList.add('hidden');
+        }
+      } else if (s.key !== currentKey) {
+        onNewTrack(s);
+      }
+    } catch {
+      // Бот выключен или перезапускается — просто ждём.
+    }
+    setTimeout(poll, 500);
+  }
+
+  // Плавный прогресс между опросами сервера.
+  function render() {
+    if (state && state.playing) {
+      const running = state.isPlaying && state.positionSec !== null;
+      let pos = state.positionSec ?? 0;
+      if (running) pos += (performance.now() - stateAt) / 1000;
+      if (state.durationSec > 0) pos = Math.min(pos, state.durationSec);
+      $('elapsed').textContent = formatTime(pos);
+      const ratio = state.durationSec > 0 ? pos / state.durationSec : 0;
+      $('fill').style.width = `${(ratio * 100).toFixed(2)}%`;
+      const played = Math.round(ratio * BAR_COUNT);
+      bars.forEach((bar, i) => bar.classList.toggle('played', i < played));
+      $('wave').classList.toggle('playing', running);
+    }
+    requestAnimationFrame(render);
+  }
+
+  poll();
+  requestAnimationFrame(render);
+</script>
+</body>
+</html>

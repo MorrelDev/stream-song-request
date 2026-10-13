@@ -13,6 +13,7 @@ import { setRequestsPaused } from './music/requestsGate.ts';
 import { PlaybackOrchestrator } from './music/playbackOrchestrator.ts';
 import { createSpotifyController, createMpvPlayer, createDefaultPlaylistLoader } from './music/playbackSetup.ts';
 import { peekNextDefaultTrack, removeDefaultTrack, replaceDefaultTracks } from './db/defaultTracks.ts';
+import { startNowPlayingOverlay } from './overlay/nowPlayingOverlay.ts';
 
 // Подстраховка: необработанный reject где-то в цепочке промисов не должен
 // ронять всё приложение посреди стрима — логируем и продолжаем работать.
@@ -154,6 +155,17 @@ registerRequestsToggleHandler(orchestrator, {
   resumeCommand: config.chat.resumeRequestsCommand,
 });
 
+// --- Оверлей "сейчас играет" для OBS ---
+const overlayServer = config.overlay
+  ? startNowPlayingOverlay({
+      port: config.overlay.port,
+      getNowPlaying: () => orchestrator.getNowPlaying(),
+      spotifyApp: config.spotify ? { clientId: config.spotify.clientId, clientSecret: config.spotify.clientSecret } : null,
+      getSpotifyPlayback: spotifyController ? () => spotifyController.getCurrentPlayback() : null,
+      yandexToken: config.yandexMusic?.token,
+    })
+  : null;
+
 logger.info(
   'app',
   isPointsMode
@@ -172,6 +184,7 @@ async function shutdown(): Promise<void> {
   logger.info('app', 'Останавливаюсь...');
   orchestrator.stop();
   chatClient.disconnect();
+  overlayServer?.close();
   if (pointsMode) {
     const pausing = pointsMode.stop().catch((err: unknown) => {
       logger.error('app', 'Не удалось поставить награду за баллы канала на паузу при выходе', err);

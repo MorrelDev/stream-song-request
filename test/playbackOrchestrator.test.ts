@@ -528,3 +528,78 @@ test('shuffled: перестановка тех же элементов, исх�
   assert.deepEqual(shuffled(src, () => 0), [2, 3, 1]);
   assert.deepEqual(src, [1, 2, 3]);
 });
+
+test('getNowPlaying: заказ — с логином заказчика; startedAt появляется, когда mpv открыл аудиовыход', async () => {
+  let audioStarted!: () => void;
+  let finish!: () => void;
+  const mpv: YoutubePlayerLike = {
+    play: () => ({
+      finished: new Promise<void>((r) => (finish = r)),
+      stop: () => finish(),
+      audioStarted: new Promise<void>((r) => (audioStarted = r)),
+    }),
+  };
+  const requests = new FakeRequests();
+  const orchestrator = new PlaybackOrchestrator(null, mpv, requests, new FakeDefaults(), null, {
+    pollIntervalMs: 5,
+    shuffleDefaultPlaylist: false,
+  });
+  assert.equal(orchestrator.getNowPlaying(), null, 'ничего не играет');
+  const done = orchestrator.start();
+  try {
+    requests.add('youtube', 'https://yt/a');
+    await until(() => orchestrator.getNowPlaying() !== null, 'заказ заиграл');
+    const pending = orchestrator.getNowPlaying()!;
+    assert.equal(pending.kind, 'request');
+    assert.equal(pending.playUri, 'https://yt/a');
+    assert.equal(pending.requestedByLogin, 'viewer1');
+    assert.equal(pending.durationSec, 100);
+    assert.equal(pending.startedAt, null, 'звук ещё не пошёл');
+
+    const before = Date.now();
+    audioStarted();
+    await until(() => orchestrator.getNowPlaying()?.startedAt !== null, 'startedAt');
+    assert.ok(orchestrator.getNowPlaying()!.startedAt! >= before);
+
+    finish();
+    await until(() => orchestrator.getNowPlaying() === null, 'заказ доиграл');
+  } finally {
+    orchestrator.stop();
+    await done;
+  }
+});
+
+test('getNowPlaying: трек дефолтного плейлиста Spotify — без заказчика, startedAt сразу', async () => {
+  const { orchestrator, done } = setup({ spotify: new FakeSpotify(), playlist: [def(1, 'spotify')] });
+  try {
+    await until(() => orchestrator.getNowPlaying() !== null, 'дефолтный трек');
+    const np = orchestrator.getNowPlaying()!;
+    assert.equal(np.kind, 'default');
+    assert.equal(np.provider, 'spotify');
+    assert.equal(np.requestedByLogin, null);
+    assert.notEqual(np.startedAt, null);
+  } finally {
+    orchestrator.stop();
+    await done;
+  }
+});
+
+test('getNowPlaying при переходе Spotify → Spotify через очередь: второй трек со своим startedAt (для оверлея)', async () => {
+  const spotify = new FakeSpotify();
+  const { orchestrator, done } = setup({ spotify, playlist: [def(1, 'spotify'), def(2, 'spotify')] });
+  try {
+    await until(() => orchestrator.getNowPlaying()?.playUri === 'spotify:track:d1', 'первый трек');
+    const first = orchestrator.getNowPlaying()!;
+    assert.notEqual(first.startedAt, null);
+    await until(() => spotify.calls.includes('queue spotify:track:d2'), 'второй трек в очереди Spotify');
+    await until(() => orchestrator.getNowPlaying()?.playUri === 'spotify:track:d2', 'второй трек заиграл');
+    const second = orchestrator.getNowPlaying()!;
+    assert.equal(second.kind, 'default');
+    assert.notEqual(second.startedAt, null);
+    assert.ok(second.startedAt! >= first.startedAt!, 'время старта второго трека — не раньше первого');
+    assert.ok(!spotify.calls.includes('play spotify:track:d2'), 'Spotify перешёл сам, без play');
+  } finally {
+    orchestrator.stop();
+    await done;
+  }
+});
