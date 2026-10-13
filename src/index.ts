@@ -12,7 +12,13 @@ import { registerRequestsToggleHandler } from './music/requestsToggleHandler.ts'
 import { setRequestsPaused } from './music/requestsGate.ts';
 import { PlaybackOrchestrator } from './music/playbackOrchestrator.ts';
 import { createSpotifyController, createMpvPlayer, createDefaultPlaylistLoader } from './music/playbackSetup.ts';
-import { peekNextDefaultTrack, removeDefaultTrack, replaceDefaultTracks } from './db/defaultTracks.ts';
+import {
+  appendDefaultTracks,
+  countDefaultTracks,
+  peekNextDefaultTrack,
+  removeDefaultTrack,
+  replaceDefaultTracks,
+} from './db/defaultTracks.ts';
 import { startNowPlayingOverlay } from './overlay/nowPlayingOverlay.ts';
 
 // Подстраховка: необработанный reject где-то в цепочке промисов не должен
@@ -132,7 +138,13 @@ const orchestrator = new PlaybackOrchestrator(
   spotifyController,
   createMpvPlayer(),
   { peekNextPending, markPlaying, markDone },
-  { peekNext: peekNextDefaultTrack, remove: removeDefaultTrack, replaceAll: replaceDefaultTracks },
+  {
+    peekNext: peekNextDefaultTrack,
+    remove: removeDefaultTrack,
+    replaceAll: replaceDefaultTracks,
+    append: appendDefaultTracks,
+    count: countDefaultTracks,
+  },
   createDefaultPlaylistLoader(spotifyController),
   {
     pollIntervalMs: config.playback.pollIntervalMs,

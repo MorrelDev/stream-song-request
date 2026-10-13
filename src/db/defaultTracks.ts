@@ -4,7 +4,8 @@ import type { SongProvider } from '../core/events.ts';
 /**
  * Треки дефолтного плейлиста — вторая "очередь" рядом с заказами
  * (db/musicQueue.ts). Заполняется целиком при старте приложения (и заново,
- * когда опустеет), играется по порядку id, проигранный трек удаляется.
+ * когда опустеет) или, для Моей волны, порциями; играется по порядку id,
+ * проигранный трек удаляется.
  */
 
 export interface NewDefaultTrack {
@@ -31,13 +32,22 @@ interface DefaultTrackRow {
 
 /** Заменяет содержимое таблицы новым списком (в переданном порядке). */
 export function replaceDefaultTracks(tracks: NewDefaultTrack[]): void {
+  insertDefaultTracks(tracks, true);
+}
+
+/** Дописывает треки в конец таблицы (порции Моей волны, см. yandexWave.ts). */
+export function appendDefaultTracks(tracks: NewDefaultTrack[]): void {
+  insertDefaultTracks(tracks, false);
+}
+
+function insertDefaultTracks(tracks: NewDefaultTrack[], clearFirst: boolean): void {
   const db = getDb();
   const insert = db.prepare(
     'INSERT INTO default_tracks (provider, play_uri, title, author, duration_sec) VALUES (?, ?, ?, ?, ?)',
   );
   db.exec('BEGIN');
   try {
-    db.exec('DELETE FROM default_tracks');
+    if (clearFirst) db.exec('DELETE FROM default_tracks');
     for (const t of tracks) {
       insert.run(t.provider, t.playUri, t.title, t.author, t.durationSec);
     }

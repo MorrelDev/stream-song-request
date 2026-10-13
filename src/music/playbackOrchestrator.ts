@@ -37,10 +37,26 @@ export interface DefaultTracksLike {
   peekNext(excludeId?: number): DefaultTrack | undefined;
   remove(id: number): void;
   replaceAll(tracks: NewDefaultTrack[]): void;
+  /** Дописывает треки в конец таблицы. */
+  append(tracks: NewDefaultTrack[]): void;
+  count(): number;
 }
 
 /** Загружает все треки дефолтного плейлиста (Spotify или Яндекс). */
 export type DefaultPlaylistLoader = () => Promise<NewDefaultTrack[]>;
+
+/**
+ * Бесконечный дефолтный "плейлист" (Моя волна Яндекс Музыки, см.
+ * yandexWave.ts): треки приходят порциями, а источнику важно знать, что с
+ * ними стало — по этому он подбирает следующие.
+ */
+export interface DefaultTrackStream {
+  /** Следующая порция треков. */
+  nextBatch(): Promise<NewDefaultTrack[]>;
+  trackStarted(track: NewDefaultTrack): void;
+  /** Трек доигран (skipped=false) или скипнут; playedSec — сколько он звучал. */
+  trackEnded(track: NewDefaultTrack, playedSec: number, skipped: boolean): void;
+}
 
 export interface OrchestratorConfig {
   /** Как часто опрашивать Spotify, пока играет его трек, и как долго "спать", когда играть нечего, мс. */
@@ -79,6 +95,8 @@ interface CurrentPlayback {
   stop?: () => void;
   /** См. NowPlayingInfo.startedAt. */
   startedAt: number | null;
+  /** Дефолтный трек скипнут (skipDefaultPlaylist) — для обратной связи DefaultTrackStream. */
+  skipped?: boolean;
 }
 
 type Item ={ kind: 'request'; track: QueuedSongRequest } | { kind: 'default'; track: DefaultTrack };
@@ -95,13 +113,21 @@ export function shuffled<T>(items: T[], random: () => number = Math.random): T[]
 const DEFAULT_REIMPORT_RETRY_MS = 60_000;
 /** За сколько до конца mpv-трека готовить следующий — как PREPARE_NEXT_LEAD_MS у Spotify. */
 const MPV_PREPARE_NEXT_LEAD_MS = 15_000;
+/**
+ * DefaultTrackStream: следующая порция подгружается, когда в таблице осталось
+ * столько треков, считая играющий, — чтобы до конца порции успеть и
+ * загрузить следующую, и подготовить её первый трек (prepareNextMpvTrack).
+ */
+const STREAM_PREFETCH_AT_COUNT = 2;
 
 /**
  * Воспроизведение музыки: две очереди в базе и один цикл.
  *
  *  - song_requests — заказы зрителей (db/musicQueue.ts);
  *  - default_tracks — треки дефолтного плейлиста (db/defaultTracks.ts),
- *    загружаются целиком при старте и заново, когда закончились.
+ *    загружаются целиком при старте и заново, когда закончились. Источник
+ *    без конца (DefaultTrackStream, Моя волна) дописывает их порциями, не
+ *    дожидаясь, пока таблица опустеет, и не перемешивает.
  *
  * Цикл: есть заказ — играть заказ; нет — играть первый трек из
  * default_tracks; трек доиграл — заказ помечается сыгранным, дефолтный трек
@@ -127,6 +153,7 @@ export class PlaybackOrchestrator {
   private readonly requests: QueueLike;
   private readonly defaults: DefaultTracksLike;
   private readonly loadDefaultPlaylist: DefaultPlaylistLoader | null;
+  private readonly stream: DefaultTrackStream | null;
   private readonly cfg: OrchestratorConfig;
 
   private stopped = false;
@@ -139,6 +166,8 @@ export class PlaybackOrchestrator {
   /** Spotify мог что-то играть: был наш трек или его запустили до старта приложения. */
   private spotifyMayBePlaying: boolean;
   private lastImportFailedAt: number | null = null;
+  /** Идущая загрузка треков: подгрузка порции волны в фоне и цикл не должны грузить одновременно. */
+  private importing: Promise<void> | null = null;
   private wakeIdle: (() => void) | undefined;
   private readonly onSongQueued = (): void => this.wake();
 
@@ -147,14 +176,15 @@ export class PlaybackOrchestrator {
     mpv: YoutubePlayerLike,
     requests: QueueLike,
     defaults: DefaultTracksLike,
-    loadDefaultPlaylist: DefaultPlaylistLoader | null,
+    defaultSource: DefaultPlaylistLoader | DefaultTrackStream | null,
     cfg: OrchestratorConfig,
   ) {
     this.spotify = spotify;
     this.mpv = mpv;
     this.requests = requests;
     this.defaults = defaults;
-    this.loadDefaultPlaylist = loadDefaultPlaylist;
+    this.loadDefaultPlaylist = typeof defaultSource === 'function' ? defaultSource : null;
+    this.stream = typeof defaultSource === 'function' ? null : defaultSource;
     this.cfg = cfg;
     this.spotifyMayBePlaying = spotify !== null;
   }
@@ -213,6 +243,7 @@ export class PlaybackOrchestrator {
   /** Скип текущего трека дефолтного плейлиста (он удаляется из таблицы, как проигранный). */
   skipDefaultPlaylist(): boolean {
     if (this.current?.item.kind !== 'default' || !this.current.stop) return false;
+    this.current.skipped = true;
     this.current.stop();
     return true;
   }
@@ -250,7 +281,7 @@ export class PlaybackOrchestrator {
     // .env. Очищаем сразу, а не только при успешной загрузке — иначе при
     // сбое загрузки доигрывался бы старый плейлист.
     this.defaults.replaceAll([]);
-    if (this.loadDefaultPlaylist) await this.importDefaultPlaylist();
+    if (this.hasDefaultSource()) await this.importDefaultPlaylist();
 
     while (!this.stopped) {
       const item = this.pickNext();
@@ -319,19 +350,45 @@ export class PlaybackOrchestrator {
     if (next && next.track.provider !== 'spotify') this.mpv.prepare?.(next.track.playUri);
   }
 
+  private hasDefaultSource(): boolean {
+    return this.loadDefaultPlaylist !== null || this.stream !== null;
+  }
+
   private shouldReimport(): boolean {
-    if (!this.loadDefaultPlaylist) return false;
+    if (!this.hasDefaultSource()) return false;
     const retryMs = this.cfg.reimportRetryMs ?? DEFAULT_REIMPORT_RETRY_MS;
     return this.lastImportFailedAt === null || Date.now() - this.lastImportFailedAt >= retryMs;
   }
 
-  private async importDefaultPlaylist(): Promise<void> {
+  /** Загрузка уже идёт (подгрузка порции волны в фоне) — дождаться её, а не грузить второй раз. */
+  private importDefaultPlaylist(): Promise<void> {
+    this.importing ??= this.doImportDefaultPlaylist().finally(() => {
+      this.importing = null;
+    });
+    return this.importing;
+  }
+
+  /** DefaultTrackStream: заранее подгрузить следующую порцию, пока играет конец текущей. */
+  private prefetchStreamBatch(): void {
+    if (!this.stream || this.importing || this.stopped) return;
+    if (this.defaults.count() > STREAM_PREFETCH_AT_COUNT || !this.shouldReimport()) return;
+    void this.importDefaultPlaylist();
+  }
+
+  private async doImportDefaultPlaylist(): Promise<void> {
     try {
-      const tracks = await this.loadDefaultPlaylist!();
-      if (tracks.length === 0) throw new Error('в плейлисте нет доступных треков');
-      this.defaults.replaceAll(this.cfg.shuffleDefaultPlaylist ? shuffled(tracks) : tracks);
+      if (this.stream) {
+        const tracks = await this.stream.nextBatch();
+        if (tracks.length === 0) throw new Error('Моя волна не вернула доступных треков');
+        this.defaults.append(tracks);
+        logger.info('playback', `Моя волна: подгружено треков: ${tracks.length}`);
+      } else {
+        const tracks = await this.loadDefaultPlaylist!();
+        if (tracks.length === 0) throw new Error('в плейлисте нет доступных треков');
+        this.defaults.replaceAll(this.cfg.shuffleDefaultPlaylist ? shuffled(tracks) : tracks);
+        logger.info('playback', `Дефолтный плейлист загружен в базу: ${tracks.length} треков`);
+      }
       this.lastImportFailedAt = null;
-      logger.info('playback', `Дефолтный плейлист загружен в базу: ${tracks.length} треков`);
     } catch (err) {
       this.lastImportFailedAt = Date.now();
       const retrySec = Math.round((this.cfg.reimportRetryMs ?? DEFAULT_REIMPORT_RETRY_MS) / 1000);
@@ -356,6 +413,10 @@ export class PlaybackOrchestrator {
       'playback',
       `${item.kind === 'request' ? 'Играет заказ' : 'Играет дефолтный плейлист'}: "${track.title}" (${track.provider})`,
     );
+    if (item.kind === 'default' && this.stream) {
+      this.stream.trackStarted(track);
+      this.prefetchStreamBatch();
+    }
 
     let ok = true;
     let prepareTimer: ReturnType<typeof setTimeout> | undefined;
@@ -403,6 +464,12 @@ export class PlaybackOrchestrator {
       this.requests.markDone(item.track.id);
     } else if (!halted) {
       this.defaults.remove(item.track.id);
+      // Остановку приложения и сбой воспроизведения волне не сообщаем —
+      // это не оценка трека; трек, остановленный !pr, ещё сыграет заново.
+      if (this.stream && ok && !this.stopped) {
+        const playedSec = current.startedAt === null ? 0 : (Date.now() - current.startedAt) / 1000;
+        this.stream.trackEnded(track, playedSec, current.skipped === true);
+      }
     }
     return ok;
   }

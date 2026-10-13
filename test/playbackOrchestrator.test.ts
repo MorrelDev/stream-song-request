@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   PlaybackOrchestrator,
   shuffled,
+  type DefaultTrackStream,
   type DefaultTracksLike,
   type QueueLike,
   type SpotifyPlaybackLike,
@@ -152,6 +153,12 @@ class FakeDefaults implements DefaultTracksLike {
   }
   replaceAll(tracks: NewDefaultTrack[]) {
     this.rows = tracks.map((t) => ({ ...t, id: this.nextId++ }));
+  }
+  append(tracks: NewDefaultTrack[]) {
+    this.rows.push(...tracks.map((t) => ({ ...t, id: this.nextId++ })));
+  }
+  count() {
+    return this.rows.length;
   }
   uris(): string[] {
     return this.rows.map((r) => r.playUri);
@@ -598,6 +605,106 @@ test('getNowPlaying при переходе Spotify → Spotify через оч�
     assert.notEqual(second.startedAt, null);
     assert.ok(second.startedAt! >= first.startedAt!, 'время старта второго трека — не раньше первого');
     assert.ok(!spotify.calls.includes('play spotify:track:d2'), 'Spotify перешёл сам, без play');
+  } finally {
+    orchestrator.stop();
+    await done;
+  }
+});
+
+/** Моя волна: порции по очереди из batches, события — в events. */
+class FakeStream implements DefaultTrackStream {
+  events: string[] = [];
+  calls = 0;
+  private readonly batches: NewDefaultTrack[][];
+  constructor(batches: NewDefaultTrack[][]) {
+    this.batches = batches;
+  }
+  async nextBatch(): Promise<NewDefaultTrack[]> {
+    return this.batches[this.calls++] ?? [];
+  }
+  trackStarted(track: NewDefaultTrack): void {
+    this.events.push(`started ${track.playUri}`);
+  }
+  trackEnded(track: NewDefaultTrack, _playedSec: number, skipped: boolean): void {
+    this.events.push(`${skipped ? 'skip' : 'finished'} ${track.playUri}`);
+  }
+}
+
+function setupStream(stream: FakeStream) {
+  const mpv = new FakeMpv();
+  const requests = new FakeRequests();
+  const defaults = new FakeDefaults();
+  const orchestrator = new PlaybackOrchestrator(null, mpv, requests, defaults, stream, {
+    pollIntervalMs: 5,
+    // Порции волны не перемешиваются, даже если перемешивание включено.
+    shuffleDefaultPlaylist: true,
+    reimportRetryMs: 30,
+  });
+  const done = orchestrator.start();
+  return { mpv, requests, defaults, orchestrator, done };
+}
+
+test('Моя волна: порции дописываются по порядку, следующая — заранее, когда после текущего остался 1 трек', async () => {
+  const stream = new FakeStream([[def(1), def(2), def(3)], [def(4), def(5)]]);
+  const { mpv, defaults, orchestrator, done } = setupStream(stream);
+  try {
+    await until(() => mpv.played.length === 1, 'трек 1');
+    assert.equal(stream.calls, 1, 'пока треков хватает — новую порцию не грузим');
+
+    mpv.finish();
+    await until(() => mpv.played.length === 2, 'трек 2');
+    await until(() => stream.calls === 2, 'подгрузка второй порции');
+    assert.deepEqual(defaults.uris(), ['yandex:track:2', 'yandex:track:3', 'yandex:track:4', 'yandex:track:5']);
+
+    mpv.finish();
+    await until(() => mpv.played.length === 3, 'трек 3');
+    mpv.finish();
+    await until(() => mpv.played.length === 4, 'трек 4 — из второй порции');
+    assert.deepEqual(mpv.played, ['yandex:track:1', 'yandex:track:2', 'yandex:track:3', 'yandex:track:4']);
+  } finally {
+    orchestrator.stop();
+    await done;
+  }
+});
+
+test('Моя волна: волна узнаёт о начале, конце и скипе трека; о !pr и остановке приложения — нет', async () => {
+  const stream = new FakeStream([[def(1), def(2), def(3), def(4)]]);
+  const { mpv, orchestrator, done } = setupStream(stream);
+  try {
+    await until(() => mpv.played.length === 1, 'трек 1');
+    mpv.finish();
+    await until(() => mpv.played.length === 2, 'трек 2');
+    assert.equal(orchestrator.skipDefaultPlaylist(), true);
+    await until(() => mpv.played.length === 3, 'трек 3');
+
+    setRequestsPaused(true);
+    await orchestrator.haltDefaultPlaylist();
+    await until(() => mpv.stopped.includes('yandex:track:3'), 'трек 3 остановлен !pr');
+    setRequestsPaused(false);
+    await orchestrator.tick();
+    await until(() => mpv.played.length === 4, 'трек 3 заново');
+  } finally {
+    orchestrator.stop();
+    await done;
+  }
+  assert.deepEqual(stream.events, [
+    'started yandex:track:1',
+    'finished yandex:track:1',
+    'started yandex:track:2',
+    'skip yandex:track:2',
+    'started yandex:track:3',
+    'started yandex:track:3',
+  ]);
+});
+
+test('Моя волна: пустая порция — ошибка загрузки, повтор позже', async () => {
+  const stream = new FakeStream([[], [def(7)]]);
+  const { mpv, orchestrator, done } = setupStream(stream);
+  try {
+    await until(() => mpv.played.length === 1, 'трек после повторной загрузки');
+    assert.deepEqual(mpv.played, ['yandex:track:7']);
+    // Третий вызов — уже подгрузка следующей порции: трек 7 в таблице последний.
+    assert.ok(stream.calls >= 2);
   } finally {
     orchestrator.stop();
     await done;

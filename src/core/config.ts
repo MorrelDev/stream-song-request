@@ -112,9 +112,10 @@ if (yandexLoudnessTargetLufs !== null && !(yandexLoudnessTargetLufs < 0 && yande
 
 // Необязательно. Дефолтный плейлист из Яндекс Музыки вместо Spotify-плейлиста.
 // Дефолтный плейлист может быть только один: заданы оба — это недосмотр,
-// падаем сразу, а не выбираем за стримера молча.
-const yandexDefaultPlaylistRaw = process.env.YANDEX_DEFAULT_PLAYLIST_URL || undefined;
-let yandexDefaultPlaylist: { ref: YandexPlaylistRef } | null = null;
+// падаем сразу, а не выбираем за стримера молча. WAVE вместо ссылки — Моя
+// волна (см. music/yandexWave.ts).
+const yandexDefaultPlaylistRaw = process.env.YANDEX_DEFAULT_PLAYLIST_URL?.trim() || undefined;
+let yandexDefaultPlaylist: { kind: 'playlist'; ref: YandexPlaylistRef } | { kind: 'wave' } | null = null;
 if (yandexDefaultPlaylistRaw) {
   if (process.env.SPOTIFY_DEFAULT_PLAYLIST_URI) {
     throw new Error(
@@ -125,14 +126,19 @@ if (yandexDefaultPlaylistRaw) {
   if (!yandexMusicToken) {
     throw new Error('YANDEX_DEFAULT_PLAYLIST_URL задан, но нет YANDEX_MUSIC_TOKEN — без токена треки не сыграть.');
   }
-  const ref = parseYandexPlaylistUrl(yandexDefaultPlaylistRaw);
-  if (!ref) {
-    throw new Error(
-      `YANDEX_DEFAULT_PLAYLIST_URL не похож на ссылку на плейлист Яндекс Музыки: "${yandexDefaultPlaylistRaw}". ` +
-        'Нужна ссылка вида https://music.yandex.ru/playlists/<id> (Поделиться → Скопировать ссылку).',
-    );
+  if (yandexDefaultPlaylistRaw.toLowerCase() === 'wave') {
+    yandexDefaultPlaylist = { kind: 'wave' };
+  } else {
+    const ref = parseYandexPlaylistUrl(yandexDefaultPlaylistRaw);
+    if (!ref) {
+      throw new Error(
+        `YANDEX_DEFAULT_PLAYLIST_URL не похож на ссылку на плейлист Яндекс Музыки: "${yandexDefaultPlaylistRaw}". ` +
+          'Нужна ссылка вида https://music.yandex.ru/playlists/<id> (Поделиться → Скопировать ссылку) ' +
+          'или WAVE — Моя волна.',
+      );
+    }
+    yandexDefaultPlaylist = { kind: 'playlist', ref };
   }
-  yandexDefaultPlaylist = { ref };
 }
 
 // Проверяем источники заказов по очереди. Не настроен ни один — заказывать
