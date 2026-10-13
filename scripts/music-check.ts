@@ -26,7 +26,13 @@ import { config } from '../src/core/config.ts';
 import { logger } from '../src/core/logger.ts';
 import { initDb } from '../src/db/index.ts';
 import { peekNextPending, markPlaying, markDone } from '../src/db/musicQueue.ts';
-import { peekNextDefaultTrack, removeDefaultTrack, replaceDefaultTracks } from '../src/db/defaultTracks.ts';
+import {
+  appendDefaultTracks,
+  countDefaultTracks,
+  peekNextDefaultTrack,
+  removeDefaultTrack,
+  replaceDefaultTracks,
+} from '../src/db/defaultTracks.ts';
 import { PlaybackOrchestrator, type SpotifyPlaybackLike, type YoutubePlayerLike } from '../src/music/playbackOrchestrator.ts';
 import { createSpotifyController, createMpvPlayer, createDefaultPlaylistLoader } from '../src/music/playbackSetup.ts';
 import { processSongRequest, type RequestHandlerConfig, type SongRequester } from '../src/music/requestHandler.ts';
@@ -141,7 +147,13 @@ const orchestrator = new PlaybackOrchestrator(
   spotifyObserved,
   mpvObserved,
   { peekNextPending, markPlaying, markDone },
-  { peekNext: peekNextDefaultTrack, remove: removeDefaultTrack, replaceAll: replaceDefaultTracks },
+  {
+    peekNext: peekNextDefaultTrack,
+    remove: removeDefaultTrack,
+    replaceAll: replaceDefaultTracks,
+    append: appendDefaultTracks,
+    count: countDefaultTracks,
+  },
   defaultPlaylistLoader,
   {
     pollIntervalMs: config.playback.pollIntervalMs,

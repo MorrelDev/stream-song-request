@@ -46,15 +46,30 @@ function playlistApiUrl(ref: YandexPlaylistRef): string {
     : `https://api.music.yandex.net/users/${encodeURIComponent(ref.owner)}/playlists/${encodeURIComponent(ref.kind)}`;
 }
 
+/** Трек в ответах API Яндекс Музыки (плейлисты, Моя волна) — только нужные поля. */
+export interface YandexTrackEntryJson {
+  id: string | number;
+  title: string;
+  version?: string;
+  durationMs?: number;
+  available?: boolean;
+  artists?: Array<{ name: string }>;
+}
+
 interface YandexPlaylistEntryJson {
   id: string | number;
-  track?: {
-    id: string | number;
-    title: string;
-    version?: string;
-    durationMs?: number;
-    available?: boolean;
-    artists?: Array<{ name: string }>;
+  track?: YandexTrackEntryJson;
+}
+
+/** Трек для таблицы дефолтных треков; null — трек недоступен, играть его нельзя. */
+export function yandexTrackToDefaultTrack(t: YandexTrackEntryJson): NewDefaultTrack | null {
+  if (t.available === false) return null;
+  return {
+    provider: 'yandex',
+    playUri: yandexPlayUri(String(t.id)),
+    title: t.version ? `${t.title} (${t.version})` : t.title,
+    author: (t.artists ?? []).map((a) => a.name).join(', '),
+    durationSec: Math.round((t.durationMs ?? 0) / 1000),
   };
 }
 
@@ -74,19 +89,13 @@ export async function fetchYandexPlaylistTracks(
   const tracks: NewDefaultTrack[] = [];
   let skipped = 0;
   for (const entry of entries) {
-    const t = entry.track;
     // Без полного объекта трека не знаем ни названия, ни доступности — пропускаем.
-    if (!t || t.available === false) {
+    const track = entry.track ? yandexTrackToDefaultTrack(entry.track) : null;
+    if (!track) {
       skipped++;
       continue;
     }
-    tracks.push({
-      provider: 'yandex',
-      playUri: yandexPlayUri(String(t.id)),
-      title: t.version ? `${t.title} (${t.version})` : t.title,
-      author: (t.artists ?? []).map((a) => a.name).join(', '),
-      durationSec: Math.round((t.durationMs ?? 0) / 1000),
-    });
+    tracks.push(track);
   }
   if (skipped > 0) {
     logger.warn('playback', `В дефолтном плейлисте Яндекс Музыки пропущено недоступных треков: ${skipped}`);

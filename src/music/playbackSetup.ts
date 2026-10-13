@@ -11,7 +11,8 @@ import {
 import { playYandexTrack } from './yandexPlayer.ts';
 import { parseYandexPlayUri, resolveYandexPlayback } from './yandexMusicProvider.ts';
 import { fetchYandexPlaylistTracks } from './yandexPlaylist.ts';
-import type { DefaultPlaylistLoader, YoutubePlayerLike } from './playbackOrchestrator.ts';
+import { YandexWave } from './yandexWave.ts';
+import type { DefaultPlaylistLoader, DefaultTrackStream, YoutubePlayerLike } from './playbackOrchestrator.ts';
 
 /**
  * Сборка плееров из config — общая для приложения (index.ts) и проверки
@@ -100,14 +101,19 @@ const PRELOAD_MAX_AGE_MS = 30 * 60_000;
 /**
  * Откуда брать треки для таблицы дефолтного плейлиста. config.ts гарантирует,
  * что задан не больше чем один плейлист: Spotify (SPOTIFY_DEFAULT_PLAYLIST_URI)
- * или Яндекс Музыка (YANDEX_DEFAULT_PLAYLIST_URL).
+ * или Яндекс Музыка (YANDEX_DEFAULT_PLAYLIST_URL) — плейлист или Моя волна.
  */
 export function createDefaultPlaylistLoader(
   spotifyController: SpotifyPlaybackController | null,
-): DefaultPlaylistLoader | null {
+): DefaultPlaylistLoader | DefaultTrackStream | null {
   const yandex = config.yandexMusic;
-  if (yandex?.defaultPlaylist) {
-    const ref = yandex.defaultPlaylist.ref;
+  const yandexDefault = yandex?.defaultPlaylist;
+  if (yandex && yandexDefault?.kind === 'wave') {
+    logger.info('app', 'Дефолтный плейлист — Моя волна Яндекс Музыки.');
+    return new YandexWave(yandex.token);
+  }
+  if (yandex && yandexDefault) {
+    const ref = yandexDefault.ref;
     return () => fetchYandexPlaylistTracks(ref, yandex.token);
   }
   const playlistUri = config.spotify?.defaultPlaylistUri;

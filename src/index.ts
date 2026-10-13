@@ -4,6 +4,7 @@ import { initDb } from './db/index.ts';
 import { peekNextPending, markPlaying, markDone } from './db/musicQueue.ts';
 import { TwitchChatClient } from './integrations/twitch/chatClient.ts';
 import { createTwitchUserTokenStore } from './integrations/twitch/twitchUserAuth.ts';
+import { getStreamViewerCount } from './integrations/twitch/streamInfo.ts';
 import { registerMusicRequestHandler, type RequestHandlerConfig } from './music/requestHandler.ts';
 import { startPointsRequestMode, disablePointsReward, type PointsModeHandle } from './music/pointsMode.ts';
 import { registerSkipVoteHandler } from './music/skipVoteHandler.ts';
@@ -12,7 +13,13 @@ import { registerRequestsToggleHandler } from './music/requestsToggleHandler.ts'
 import { setRequestsPaused } from './music/requestsGate.ts';
 import { PlaybackOrchestrator } from './music/playbackOrchestrator.ts';
 import { createSpotifyController, createMpvPlayer, createDefaultPlaylistLoader } from './music/playbackSetup.ts';
-import { peekNextDefaultTrack, removeDefaultTrack, replaceDefaultTracks } from './db/defaultTracks.ts';
+import {
+  appendDefaultTracks,
+  countDefaultTracks,
+  peekNextDefaultTrack,
+  removeDefaultTrack,
+  replaceDefaultTracks,
+} from './db/defaultTracks.ts';
 import { startNowPlayingOverlay } from './overlay/nowPlayingOverlay.ts';
 
 // Подстраховка: необработанный reject где-то в цепочке промисов не должен
@@ -132,7 +139,13 @@ const orchestrator = new PlaybackOrchestrator(
   spotifyController,
   createMpvPlayer(),
   { peekNextPending, markPlaying, markDone },
-  { peekNext: peekNextDefaultTrack, remove: removeDefaultTrack, replaceAll: replaceDefaultTracks },
+  {
+    peekNext: peekNextDefaultTrack,
+    remove: removeDefaultTrack,
+    replaceAll: replaceDefaultTracks,
+    append: appendDefaultTracks,
+    count: countDefaultTracks,
+  },
   createDefaultPlaylistLoader(spotifyController),
   {
     pollIntervalMs: config.playback.pollIntervalMs,
@@ -145,7 +158,12 @@ void orchestrator.start();
 registerSkipVoteHandler(orchestrator, {
   commandName: config.chat.skipCommand,
   thresholdPercent: config.chat.skipThresholdPercent,
-  activeWindowMs: config.chat.skipActiveWindowMs,
+  getViewerCount: () =>
+    getStreamViewerCount({
+      clientId: config.twitch.clientId,
+      broadcasterId: config.chat.broadcasterId,
+      getAccessToken: () => twitchUserTokens.getValidAccessToken(),
+    }),
 });
 
 registerCurrentTrackHandler(orchestrator, { commandName: config.chat.currentTrackCommand });
