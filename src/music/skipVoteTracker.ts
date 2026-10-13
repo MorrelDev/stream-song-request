@@ -1,64 +1,70 @@
 export interface SkipVoteTrackerConfig {
-  /** Процент от числа "активных" зрителей, необходимый для скипа (например 30). */
+  /** Процент от числа зрителей стрима, необходимый для скипа (например 30). */
   thresholdPercent: number;
-  /** За сколько мс до "сейчас" зритель считается активным (писал что-либо в чат). */
-  activeWindowMs: number;
 }
 
+export type VoteResult =
+  /** Голос учтён, порог ещё не достигнут. */
+  | 'counted'
+  /** Этим голосом порог достигнут — трек пора скипать. */
+  | 'passed'
+  /** Порог уже был достигнут раньше — голос ни на что не влияет. */
+  | 'closed';
+
 /**
- * Отслеживает "активных" зрителей чата (кто угодно писал что-либо в чат за
- * последние activeWindowMs — не только команду скипа) и голоса за скип
- * текущего заказа. Голосование считается успешным, когда число голосов
- * достигает порога — округлённого вверх процента от числа активных
- * зрителей (Math.ceil, чтобы, например, при 3 активных и пороге 30%
- * требовался хотя бы 1 голос, а не 0 — 30% от 3 это 0.9, что интуитивно
- * должно означать "нужен хотя бы один голос").
+ * Голоса за скип текущего трека. Порог — округлённый вверх процент от числа
+ * зрителей стрима (Math.ceil, чтобы, например, при 3 зрителях и пороге 30%
+ * требовался хотя бы 1 голос, а не 0 — 30% от 3 это 0.9).
+ *
+ * Порог задаётся один раз на трек (lockThreshold — при первом голосе) и
+ * дальше не меняется до resetVotes(): число зрителей за время трека плавает,
+ * и без фиксации планка двигалась бы посреди голосования.
  */
 export class SkipVoteTracker {
   private readonly cfg: SkipVoteTrackerConfig;
-  private readonly lastActiveAt = new Map<string, number>();
   private readonly votes = new Set<string>();
+  /** Порог для текущего трека; null — ещё не зафиксирован. */
+  private required: number | null = null;
 
   constructor(cfg: SkipVoteTrackerConfig) {
     this.cfg = cfg;
   }
 
-  /** Отмечает пользователя активным — вызывается на каждое сообщение в чате. */
-  recordActivity(userId: string, now: number = Date.now()): void {
-    this.lastActiveAt.set(userId, now);
+  /** Сколько голосов нужно при данном числе зрителей (не меньше 1). */
+  computeRequired(viewerCount: number): number {
+    return Math.max(1, Math.ceil((viewerCount * this.cfg.thresholdPercent) / 100));
   }
 
-  /** Число уникальных пользователей, писавших в чат за последние activeWindowMs. */
-  countActive(now: number = Date.now()): number {
-    let count = 0;
-    for (const ts of this.lastActiveAt.values()) {
-      if (now - ts <= this.cfg.activeWindowMs) count += 1;
-    }
-    return count;
+  /** Фиксирует порог текущего трека по числу зрителей; повторные вызовы игнорируются. */
+  lockThreshold(viewerCount: number): void {
+    this.required ??= this.computeRequired(viewerCount);
   }
 
-  /** Сколько голосов сейчас нужно для скипа, при текущем числе активных зрителей. */
-  requiredVotes(now: number = Date.now()): number {
-    const active = this.countActive(now);
-    return Math.max(1, Math.ceil((active * this.cfg.thresholdPercent) / 100));
+  /** Зафиксированный порог текущего трека или null, если голосование ещё не начиналось. */
+  requiredVotes(): number | null {
+    return this.required;
   }
 
   /**
    * Регистрирует голос пользователя за скип (повторный голос того же
-   * пользователя не учитывается дважды). Возвращает true, если после этого
-   * голоса порог достигнут.
+   * пользователя не учитывается дважды). 'passed' возвращается ровно один
+   * раз за трек — чтобы почти одновременные голоса не скипнули два трека.
+   * Порог должен быть зафиксирован заранее (lockThreshold).
    */
-  vote(userId: string, now: number = Date.now()): boolean {
+  vote(userId: string): VoteResult {
+    if (this.required === null) throw new Error('Порог скипа не зафиксирован');
+    if (this.votes.size >= this.required) return 'closed';
     this.votes.add(userId);
-    return this.votes.size >= this.requiredVotes(now);
+    return this.votes.size >= this.required ? 'passed' : 'counted';
   }
 
   get voteCount(): number {
     return this.votes.size;
   }
 
-  /** Сбрасывает голоса (вызывается при смене трека) — активность зрителей НЕ сбрасывается. */
+  /** Сбрасывает голоса и порог (вызывается при смене трека). */
   resetVotes(): void {
     this.votes.clear();
+    this.required = null;
   }
 }

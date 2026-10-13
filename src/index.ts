@@ -4,6 +4,7 @@ import { initDb } from './db/index.ts';
 import { peekNextPending, markPlaying, markDone } from './db/musicQueue.ts';
 import { TwitchChatClient } from './integrations/twitch/chatClient.ts';
 import { createTwitchUserTokenStore } from './integrations/twitch/twitchUserAuth.ts';
+import { getStreamViewerCount } from './integrations/twitch/streamInfo.ts';
 import { registerMusicRequestHandler, type RequestHandlerConfig } from './music/requestHandler.ts';
 import { startPointsRequestMode, disablePointsReward, type PointsModeHandle } from './music/pointsMode.ts';
 import { registerSkipVoteHandler } from './music/skipVoteHandler.ts';
@@ -157,7 +158,12 @@ void orchestrator.start();
 registerSkipVoteHandler(orchestrator, {
   commandName: config.chat.skipCommand,
   thresholdPercent: config.chat.skipThresholdPercent,
-  activeWindowMs: config.chat.skipActiveWindowMs,
+  getViewerCount: () =>
+    getStreamViewerCount({
+      clientId: config.twitch.clientId,
+      broadcasterId: config.chat.broadcasterId,
+      getAccessToken: () => twitchUserTokens.getValidAccessToken(),
+    }),
 });
 
 registerCurrentTrackHandler(orchestrator, { commandName: config.chat.currentTrackCommand });

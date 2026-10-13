@@ -215,11 +215,9 @@ export const config = {
     currentTrackCommand: process.env.MUSIC_CURRENT_COMMAND ?? '!s',
     // Команда голосования за скип текущего трека и порог голосования — см.
     // skipVoteHandler.ts. Скипает броадкастер — сразу, без порога; остальные
-    // зрители — голосованием, от числа уникальных "активных" в чате (тех,
-    // кто писал что-либо за последние skipActiveWindowMs).
+    // зрители — голосованием, от числа зрителей стрима (Twitch Get Streams).
     skipCommand: process.env.MUSIC_SKIP_COMMAND ?? '!skip',
     skipThresholdPercent: Number(process.env.MUSIC_SKIP_THRESHOLD_PERCENT ?? 30),
-    skipActiveWindowMs: Number(process.env.MUSIC_SKIP_ACTIVE_WINDOW_MS ?? 600_000),
     // Команды приостановки/возобновления приёма заказов (только для стримера
     // и модераторов) — см. requestsToggleHandler.ts. Пока приостановлено, не
     // играет и дефолтный плейлист (не только новые заказы недоступны).
