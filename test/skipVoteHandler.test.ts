@@ -5,7 +5,13 @@ import { registerSkipVoteHandler, type SkipableOrchestrator } from '../src/music
 import type { ChatMessageEvent } from '../src/core/events.ts';
 
 // 10 зрителей на стриме — при пороге 30% нужно 3 голоса.
-const cfg = { commandName: '!skip', thresholdPercent: 30, getViewerCount: async (): Promise<number | null> => 10 };
+const cfg = {
+  commandName: '!skip',
+  thresholdPercent: 30,
+  moderatorCanSkip: false,
+  requesterCanSkipOwnRequest: false,
+  getViewerCount: async (): Promise<number | null> => 10,
+};
 
 /** Даёт асинхронной обработке !skip (запрос числа зрителей) завершиться. */
 const flush = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
@@ -68,9 +74,9 @@ test('broadcaster скипает трек сразу, без учёта поро
   }
 });
 
-test('модератор скипает трек сразу, как стример, без учёта порога голосования', async () => {
+test('модератор скипает заказ сразу, если это разрешено настройкой', async () => {
   const orchestrator = new FakeOrchestrator();
-  const { unregister } = registerSkipVoteHandler(orchestrator, cfg);
+  const { unregister } = registerSkipVoteHandler(orchestrator, { ...cfg, moderatorCanSkip: true });
   const { replies, unsubscribe } = collectReplies();
   try {
     eventBus.emit('chat.message', makeMsg({ userId: 'mod-1', isModerator: true }));
@@ -83,10 +89,41 @@ test('модератор скипает трек сразу, как стриме
   }
 });
 
-test('модератор скипает трек дефолтного плейлиста сразу', async () => {
+test('по умолчанию !skip модератора на заказе — обычный голос', async () => {
+  const orchestrator = new FakeOrchestrator();
+  const { unregister } = registerSkipVoteHandler(orchestrator, cfg);
+  const { replies, unsubscribe } = collectReplies();
+  try {
+    eventBus.emit('chat.message', makeMsg({ userId: 'mod-1', isModerator: true }));
+    await flush();
+    assert.equal(orchestrator.skipCalls, 0);
+    assert.match(replies[0], /голос за скип принят \(1\/3\)/);
+  } finally {
+    unsubscribe();
+    unregister();
+  }
+});
+
+test('по умолчанию !skip модератора на треке дефолтного плейлиста — обычный голос', async () => {
   const orchestrator = new FakeOrchestrator();
   orchestrator.mode = 'default';
   const { unregister } = registerSkipVoteHandler(orchestrator, cfg);
+  const { replies, unsubscribe } = collectReplies();
+  try {
+    eventBus.emit('chat.message', makeMsg({ userId: 'mod-1', isModerator: true }));
+    await flush();
+    assert.equal(orchestrator.skipDefaultPlaylistCalls, 0);
+    assert.match(replies[0], /голос за скип принят \(1\/3\)/);
+  } finally {
+    unsubscribe();
+    unregister();
+  }
+});
+
+test('модератор скипает трек дефолтного плейлиста сразу, если это разрешено настройкой', async () => {
+  const orchestrator = new FakeOrchestrator();
+  orchestrator.mode = 'default';
+  const { unregister } = registerSkipVoteHandler(orchestrator, { ...cfg, moderatorCanSkip: true });
   const { replies, unsubscribe } = collectReplies();
   try {
     eventBus.emit('chat.message', makeMsg({ userId: 'mod-1', isModerator: true }));
@@ -177,7 +214,7 @@ test('зрители могут скипнуть трек дефолтного �
 test('заказчик текущего заказа не имеет мгновенного скипа над треками дефолтного плейлиста (у них нет заказчика)', async () => {
   const orchestrator = new FakeOrchestrator();
   orchestrator.mode = 'default';
-  const { unregister } = registerSkipVoteHandler(orchestrator, cfg);
+  const { unregister } = registerSkipVoteHandler(orchestrator, { ...cfg, requesterCanSkipOwnRequest: true });
   const { replies, unsubscribe } = collectReplies();
   try {
     // Раньше 'viewer-1' заказывал трек — но сейчас играет дефолтный плейлист,
@@ -263,9 +300,9 @@ test('song.now_playing сбрасывает накопленные голоса 
   }
 });
 
-test('зритель, заказавший текущий трек, скипает его сразу — без голосования', async () => {
+test('зритель, заказавший текущий трек, скипает его сразу, если это разрешено настройкой', async () => {
   const orchestrator = new FakeOrchestrator();
-  const { unregister } = registerSkipVoteHandler(orchestrator, cfg);
+  const { unregister } = registerSkipVoteHandler(orchestrator, { ...cfg, requesterCanSkipOwnRequest: true });
   const { replies, unsubscribe } = collectReplies();
   try {
     eventBus.emit('song.now_playing', { title: 'Requester track', provider: 'youtube', requestedById: 'viewer-1' });
@@ -275,6 +312,24 @@ test('зритель, заказавший текущий трек, скипае
 
     assert.equal(orchestrator.skipCalls, 1);
     assert.match(replies.at(-1) ?? '', /скипнут.*твой заказ/s);
+  } finally {
+    unsubscribe();
+    unregister();
+  }
+});
+
+test('по умолчанию !skip заказчика на своём заказе — обычный голос', async () => {
+  const orchestrator = new FakeOrchestrator();
+  const { unregister } = registerSkipVoteHandler(orchestrator, cfg);
+  const { replies, unsubscribe } = collectReplies();
+  try {
+    eventBus.emit('song.now_playing', { title: 'Requester track', provider: 'youtube', requestedById: 'viewer-1' });
+
+    eventBus.emit('chat.message', makeMsg({ userId: 'viewer-1', text: '!skip' }));
+    await flush();
+
+    assert.equal(orchestrator.skipCalls, 0);
+    assert.match(replies.at(-1) ?? '', /голос за скип принят \(1\/3\)/);
   } finally {
     unsubscribe();
     unregister();
@@ -301,7 +356,7 @@ test('зритель, который трек НЕ заказывал, не мо
 
 test('право мгновенного скипа не переносится на следующий трек, если его заказал кто-то другой', async () => {
   const orchestrator = new FakeOrchestrator();
-  const { unregister } = registerSkipVoteHandler(orchestrator, cfg);
+  const { unregister } = registerSkipVoteHandler(orchestrator, { ...cfg, requesterCanSkipOwnRequest: true });
   const { replies, unsubscribe } = collectReplies();
   try {
     eventBus.emit('song.now_playing', { title: 'First', provider: 'youtube', requestedById: 'viewer-1' });

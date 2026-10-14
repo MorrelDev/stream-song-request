@@ -158,6 +158,8 @@ void orchestrator.start();
 registerSkipVoteHandler(orchestrator, {
   commandName: config.chat.skipCommand,
   thresholdPercent: config.chat.skipThresholdPercent,
+  moderatorCanSkip: config.chat.moderatorCanSkip,
+  requesterCanSkipOwnRequest: config.chat.requesterCanSkipOwnRequest,
   getViewerCount: () =>
     getStreamViewerCount({
       clientId: config.twitch.clientId,

@@ -7,6 +7,16 @@ export interface SkipVoteHandlerConfig {
   /** Например "!skip". Сравнение регистронезависимое. */
   commandName: string;
   thresholdPercent: number;
+  /**
+   * Может ли модератор мгновенно скипнуть трек — и заказ, и трек дефолтного
+   * плейлиста. false — его !skip идёт в общее голосование, как от обычного зрителя.
+   */
+  moderatorCanSkip: boolean;
+  /**
+   * Может ли заказчик мгновенно скипнуть свой заказ, пока тот играет. false —
+   * его !skip идёт в общее голосование, как от любого другого зрителя.
+   */
+  requesterCanSkipOwnRequest: boolean;
   /** Текущее число зрителей стрима; null — стрим оффлайн. */
   getViewerCount: () => Promise<number | null>;
 }
@@ -29,10 +39,12 @@ function reply(text: string): void {
  * Условие (по требованию): трек скипается сразу, без порога, если команду
  * !skip введёт либо сам стример или модератор канала (по правам на скип
  * модератор равен стримеру; это скорее для YouTube-заказов, которые иначе не
- * переключить), либо (только для
+ * переключить; мгновенный скип модератором выключается настройкой
+ * moderatorCanSkip), либо (только для
  * заказов) тот же зритель, который этот трек и заказал (это его собственный
  * заказ — разумно, что он может передумать без голосования; у треков
- * дефолтного плейлиста заказчика нет, эта льгота на них не распространяется).
+ * дефолтного плейлиста заказчика нет, эта льгота на них не распространяется;
+ * выключается настройкой requesterCanSkipOwnRequest).
  * Для всех остальных — обычное голосование: наберётся достаточно голосов —
  * 30% (настраивается) от числа зрителей стрима (viewer_count из Twitch Get
  * Streams). Число зрителей запрашивается один раз на трек — при первом
@@ -96,7 +108,9 @@ export function registerSkipVoteHandler(
 
     const isRequestMode = orchestrator.getMode() === 'request';
 
-    if (msg.isBroadcaster || msg.isModerator) {
+    const canSkipInstantly =
+      msg.isBroadcaster || (msg.isModerator && cfg.moderatorCanSkip);
+    if (canSkipInstantly) {
       if (doSkip()) {
         reply(msg.isBroadcaster ? 'Трек скипнут по команде стримера' : 'Трек скипнут по команде модератора');
       } else {
@@ -105,7 +119,12 @@ export function registerSkipVoteHandler(
       return;
     }
 
-    if (isRequestMode && currentRequesterId !== null && msg.userId === currentRequesterId) {
+    if (
+      cfg.requesterCanSkipOwnRequest &&
+      isRequestMode &&
+      currentRequesterId !== null &&
+      msg.userId === currentRequesterId
+    ) {
       if (orchestrator.skip()) {
         reply(`@${msg.displayName} трек скипнут — это был твой заказ`);
       }
