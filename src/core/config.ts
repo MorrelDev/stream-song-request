@@ -89,6 +89,26 @@ if (privilegeModeRaw !== 'true' && privilegeModeRaw !== 'false') {
 }
 const privilegeMode = privilegeModeRaw === 'true';
 
+// Может ли модератор мгновенно скипнуть трек (без голосования) — см.
+// MUSIC_MODERATOR_SKIP_REQUESTS в .env.example. По умолчанию нет.
+const moderatorSkipRequestsRaw = (process.env.MUSIC_MODERATOR_SKIP_REQUESTS ?? 'false').trim().toLowerCase();
+if (moderatorSkipRequestsRaw !== 'true' && moderatorSkipRequestsRaw !== 'false') {
+  throw new Error(
+    `MUSIC_MODERATOR_SKIP_REQUESTS должен быть "true" или "false", а задано "${process.env.MUSIC_MODERATOR_SKIP_REQUESTS}".`,
+  );
+}
+const moderatorCanSkip = moderatorSkipRequestsRaw === 'true';
+
+// Может ли заказчик мгновенно скипнуть свой заказ (без голосования) — см.
+// MUSIC_REQUESTER_SKIP_REQUESTS в .env.example. По умолчанию нет.
+const requesterSkipRequestsRaw = (process.env.MUSIC_REQUESTER_SKIP_REQUESTS ?? 'false').trim().toLowerCase();
+if (requesterSkipRequestsRaw !== 'true' && requesterSkipRequestsRaw !== 'false') {
+  throw new Error(
+    `MUSIC_REQUESTER_SKIP_REQUESTS должен быть "true" или "false", а задано "${process.env.MUSIC_REQUESTER_SKIP_REQUESTS}".`,
+  );
+}
+const requesterCanSkipOwnRequest = requesterSkipRequestsRaw === 'true';
+
 const rewardCost = Number(process.env.MUSIC_REWARD_COST ?? 500);
 if (!Number.isInteger(rewardCost) || rewardCost < 1) {
   throw new Error(`MUSIC_REWARD_COST должен быть целым числом баллов от 1, а задано "${process.env.MUSIC_REWARD_COST}".`);
@@ -216,8 +236,13 @@ export const config = {
     // Команда голосования за скип текущего трека и порог голосования — см.
     // skipVoteHandler.ts. Скипает броадкастер — сразу, без порога; остальные
     // зрители — голосованием, от числа зрителей стрима (Twitch Get Streams).
+    // Модератор скипает сразу (и заказ, и трек дефолтного плейлиста), только
+    // если moderatorCanSkip (иначе голосует, как зритель). Заказчик
+    // скипает свой заказ сразу, только если requesterCanSkipOwnRequest.
     skipCommand: process.env.MUSIC_SKIP_COMMAND ?? '!skip',
     skipThresholdPercent: Number(process.env.MUSIC_SKIP_THRESHOLD_PERCENT ?? 30),
+    moderatorCanSkip,
+    requesterCanSkipOwnRequest,
     // Команды приостановки/возобновления приёма заказов (только для стримера
     // и модераторов) — см. requestsToggleHandler.ts. Пока приостановлено, не
     // играет и дефолтный плейлист (не только новые заказы недоступны).
