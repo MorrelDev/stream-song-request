@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeSpotifyPlaylistUri } from '../src/music/spotifyPlaylistUri.ts';
+import { normalizeSpotifyPlaylistUri, SPOTIFY_TOP_TRACKS } from '../src/music/spotifyPlaylistUri.ts';
 
 test('принимает обычную ссылку-шаринг с ?si=...', () => {
   const result = normalizeSpotifyPlaylistUri(
@@ -32,4 +32,9 @@ test('обрезает пробелы по краям', () => {
 test('бросает понятную ошибку на нераспознанное значение', () => {
   assert.throws(() => normalizeSpotifyPlaylistUri('https://example.com/not-a-playlist'), /не удалось распознать/);
   assert.throws(() => normalizeSpotifyPlaylistUri(''), /не удалось распознать/);
+});
+
+test('TOP (в любом регистре) — топ-треки вместо плейлиста', () => {
+  assert.equal(normalizeSpotifyPlaylistUri('TOP'), SPOTIFY_TOP_TRACKS);
+  assert.equal(normalizeSpotifyPlaylistUri(' top '), SPOTIFY_TOP_TRACKS);
 });

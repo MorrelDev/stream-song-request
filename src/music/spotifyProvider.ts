@@ -1,4 +1,5 @@
 import { getSpotifyAppToken } from './spotifyAuth.ts';
+import { logger } from '../core/logger.ts';
 import type { TokenStore } from '../core/tokenStore.ts';
 
 export interface SpotifyTrackDetails {
@@ -194,6 +195,53 @@ export class SpotifyPlaybackController {
   }
 
   /**
+   * Только для лога: что на самом деле играет и что лежит в очереди Spotify,
+   * когда плеер ждал expectedUri, а заиграл другой трек. Помогает отличить
+   * подмену id (track relinking: тот же трек под другим id — виден
+   * linked_from) от чужого трека, застрявшего в очереди. Не бросает ошибок.
+   */
+  async diagnosePlayback(expectedUri: string): Promise<string> {
+    const describe = (t: { uri: string; name?: string; artists?: Array<{ name: string }> }) =>
+      `${t.uri} "${(t.artists ?? []).map((a) => a.name).join(', ')} - ${t.name ?? '?'}"`;
+    const parts = [`ожидался ${expectedUri}`];
+    try {
+      const res = await this.fetchImpl('https://api.spotify.com/v1/me/player?market=from_token', {
+        headers: await this.authHeaders(),
+      });
+      if (res.status === 204) {
+        parts.push('играет: ничего');
+      } else if (!res.ok) {
+        parts.push(`играет: HTTP ${res.status}`);
+      } else {
+        const data = (await res.json()) as {
+          is_playing: boolean;
+          item: { uri: string; name: string; artists?: Array<{ name: string }>; linked_from?: { uri: string } } | null;
+        };
+        parts.push(
+          data.item
+            ? `играет${data.is_playing ? '' : ' (пауза)'}: ${describe(data.item)}, linked_from: ${data.item.linked_from?.uri ?? 'нет'}`
+            : 'играет: ничего',
+        );
+      }
+    } catch (err) {
+      parts.push(`играет: ошибка ${String(err)}`);
+    }
+    try {
+      const res = await this.fetchImpl('https://api.spotify.com/v1/me/player/queue', { headers: await this.authHeaders() });
+      if (!res.ok) {
+        parts.push(`очередь: HTTP ${res.status}`);
+      } else {
+        const data = (await res.json()) as { queue?: Array<{ uri: string; name?: string; artists?: Array<{ name: string }> }> };
+        const queue = (data.queue ?? []).slice(0, 5);
+        parts.push(`очередь: ${queue.length ? queue.map(describe).join('; ') : 'пусто'}`);
+      }
+    } catch (err) {
+      parts.push(`очередь: ошибка ${String(err)}`);
+    }
+    return parts.join(' | ');
+  }
+
+  /**
    * Немедленно запускает конкретный трек (и заказы, и треки дефолтного плейлиста).
    *
    * Реализовано через "добавить в очередь + переключиться на следующий", а
@@ -237,6 +285,10 @@ export class SpotifyPlaybackController {
    * закрыл (HTTP 403 для любых плейлистов). Локальные файлы, подкасты и
    * недоступные в регионе треки пропускаются.
    *
+   * market=from_token — иначе Spotify не присылает is_playable, и треки,
+   * недоступные в регионе аккаунта, попадают в базу: Spotify их не играет
+   * ("так и не начал играть трек").
+   *
    * Приложения Spotify в режиме разработки видят только плейлисты из
    * медиатеки пользователя — на чужой плейлист, не добавленный в медиатеку,
    * Spotify отвечает 403.
@@ -245,7 +297,8 @@ export class SpotifyPlaybackController {
     const playlistId = playlistUri.split(':').pop()!;
     const tracks: SpotifyPlaylistTrack[] = [];
     let url: string | null =
-      `https://api.spotify.com/v1/playlists/${encodeURIComponent(playlistId)}/items?limit=50&additional_types=track`;
+      `https://api.spotify.com/v1/playlists/${encodeURIComponent(playlistId)}/items?limit=50&additional_types=track&market=from_token`;
+    let unplayable = 0;
 
     while (url) {
       const res = await this.fetchImpl(url, { headers: await this.authHeaders() });
@@ -279,7 +332,11 @@ export class SpotifyPlaybackController {
       };
       for (const entry of data.items) {
         const t = entry.item;
-        if (!t || t.type !== 'track' || entry.is_local || t.is_local || t.is_playable === false) continue;
+        if (!t || t.type !== 'track' || entry.is_local || t.is_local) continue;
+        if (t.is_playable === false) {
+          unplayable++;
+          continue;
+        }
         tracks.push({
           uri: t.uri,
           title: t.name,
@@ -289,6 +346,62 @@ export class SpotifyPlaybackController {
       }
       url = data.next;
     }
+    if (unplayable > 0) logger.warn('playback', `В дефолтном плейлисте Spotify пропущено недоступных в регионе треков: ${unplayable}`);
+    return tracks;
+  }
+
+  /**
+   * Топ-треки пользователя (/me/top/tracks) за период: long_term — примерно
+   * год, medium_term — полгода, short_term — месяц. Источник для
+   * SPOTIFY_DEFAULT_PLAYLIST_URI=TOP (микс из трёх периодов — spotifyTopMix.ts).
+   * Алгоритмические плейлисты (daylist, Daily Mix) для приложений в режиме
+   * разработки Spotify закрыл (HTTP 404), поэтому "микс дня" собираем сами.
+   * Нужен scope user-top-read (npm run auth:spotify). market=from_token —
+   * чтобы отсеять недоступные в регионе треки, как в fetchPlaylistTracks.
+   */
+  async fetchTopTracks(timeRange: 'short_term' | 'medium_term' | 'long_term'): Promise<SpotifyPlaylistTrack[]> {
+    const tracks: SpotifyPlaylistTrack[] = [];
+    let url: string | null = `https://api.spotify.com/v1/me/top/tracks?time_range=${timeRange}&limit=50&market=from_token`;
+    let unplayable = 0;
+
+    while (url) {
+      const res = await this.fetchImpl(url, { headers: await this.authHeaders() });
+      if (res.status === 401 || res.status === 403) {
+        throw new Error(
+          `Spotify не дал прочитать топ-треки (HTTP ${res.status}). Для SPOTIFY_DEFAULT_PLAYLIST_URI=TOP токену ` +
+            'нужно право user-top-read — заново пройди авторизацию: npm run auth:spotify.',
+        );
+      }
+      if (!res.ok) {
+        throw new Error(`Spotify вернул HTTP ${res.status} при чтении топ-треков`);
+      }
+      const data = (await res.json()) as {
+        next: string | null;
+        items: Array<{
+          uri: string;
+          name: string;
+          duration_ms: number;
+          is_playable?: boolean;
+          is_local?: boolean;
+          artists?: Array<{ name: string }>;
+        } | null>;
+      };
+      for (const t of data.items) {
+        if (!t || t.is_local) continue;
+        if (t.is_playable === false) {
+          unplayable++;
+          continue;
+        }
+        tracks.push({
+          uri: t.uri,
+          title: t.name,
+          artist: (t.artists ?? []).map((a) => a.name).join(', '),
+          durationMs: t.duration_ms,
+        });
+      }
+      url = data.next;
+    }
+    if (unplayable > 0) logger.warn('playback', `Топ-треки Spotify (${timeRange}): пропущено недоступных в регионе: ${unplayable}`);
     return tracks;
   }
 

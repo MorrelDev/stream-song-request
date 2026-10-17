@@ -6,8 +6,20 @@
  * плейлиста — и приводить всё это к единому виду spotify:playlist:<id>,
  * который требует Spotify Web API в параметре context_uri.
  */
+/**
+ * Особое значение SPOTIFY_DEFAULT_PLAYLIST_URI=TOP: вместо плейлиста играть
+ * микс топ-треков пользователя за год, полгода и месяц (/me/top/tracks,
+ * см. spotifyTopMix.ts) — "свой микс дня". Алгоритмические плейлисты Spotify (daylist, Daily Mix) Web API
+ * приложениям в режиме разработки не отдаёт, см. fetchTopTracks.
+ */
+export const SPOTIFY_TOP_TRACKS = 'top';
+
 export function normalizeSpotifyPlaylistUri(raw: string): string {
   const trimmed = raw.trim();
+
+  if (trimmed.toLowerCase() === SPOTIFY_TOP_TRACKS) {
+    return SPOTIFY_TOP_TRACKS;
+  }
 
   if (trimmed.startsWith('spotify:playlist:')) {
     return trimmed;
@@ -29,6 +41,7 @@ export function normalizeSpotifyPlaylistUri(raw: string): string {
 
   throw new Error(
     `SPOTIFY_DEFAULT_PLAYLIST_URI: не удалось распознать плейлист в значении "${raw}". ` +
-      'Подойдёт ссылка вида https://open.spotify.com/playlist/<id>, просто <id> или spotify:playlist:<id>.',
+      'Подойдёт ссылка вида https://open.spotify.com/playlist/<id>, просто <id>, spotify:playlist:<id> ' +
+        'или TOP (топ-треки аккаунта).',
   );
 }

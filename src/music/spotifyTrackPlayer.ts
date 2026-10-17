@@ -8,9 +8,13 @@ export interface SpotifyPlayerApi {
     progressMs: number;
     durationMs: number;
     trackUri: string | null;
+    trackTitle?: string | null;
+    trackArtist?: string | null;
   } | null>;
   playTrackUri(uri: string): Promise<void>;
   skipToNext(): Promise<void>;
+  /** Только для лога: что на самом деле играет и что в очереди (см. SpotifyPlaybackController.diagnosePlayback). */
+  diagnosePlayback?(expectedUri: string): Promise<string>;
 }
 
 export interface SpotifyTrackPlayerOptions {
@@ -32,6 +36,42 @@ export interface SpotifyTrackPlayerOptions {
    * за HANDOFF_EARLY_MS до конца, чтобы оркестратор успел поставить паузу.
    */
   prepareNext?: () => Promise<boolean>;
+  /**
+   * Название и исполнитель трека. Spotify бывает играет ту же песню под
+   * другим id — например, версию с альбома вместо запрошенной с сингла, и
+   * API об этом никак не сообщает (linked_from пуст). По названию и
+   * исполнителю плеер узнаёт такую подмену и не скипает "чужой" трек.
+   */
+  expected?: { title: string; artist: string };
+}
+
+/**
+ * Название без уточнений версии: "(Remastered 2011)", "[Live]",
+ * " - Single Version" и т.п. — у разных релизов одной песни они различаются.
+ */
+function normalizeTitle(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/\s*[([].*?[)\]]/g, '')
+    .replace(/\s+-\s+.*$/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function firstArtist(artist: string): string {
+  return artist.split(',')[0].trim().toLowerCase();
+}
+
+/** Та же песня, что и expected, — пусть и под другим id. */
+export function isSameSong(
+  playing: { trackTitle?: string | null; trackArtist?: string | null },
+  expected: { title: string; artist: string },
+): boolean {
+  if (!playing.trackTitle || !playing.trackArtist) return false;
+  return (
+    normalizeTitle(playing.trackTitle) === normalizeTitle(expected.title) &&
+    firstArtist(playing.trackArtist) === firstArtist(expected.artist)
+  );
 }
 
 /** Сколько опросов подряд ждать, пока трек начнёт играть, прежде чем сдаться. */
@@ -99,6 +139,23 @@ export function playSpotifyTrack(
 ): PlaybackSession {
   let stopped = false;
   let wake: (() => void) | undefined;
+  /** id, под которым Spotify на самом деле играет трек (см. options.expected). */
+  let playingUri = uri;
+
+  /**
+   * Играет ли наш трек (пока ждём старта). Если это та же песня под другим
+   * id — запоминаем этот id: дальше конец трека отслеживается по нему.
+   */
+  const isOurs = (pb: { trackUri: string | null; trackTitle?: string | null; trackArtist?: string | null }): boolean => {
+    if (pb.trackUri === uri || pb.trackUri === playingUri) return true;
+    if (!pb.trackUri || !options.expected || !isSameSong(pb, options.expected)) return false;
+    logger.info(
+      'playback',
+      `Spotify играет "${options.expected.title}" под другим id (${pb.trackUri} вместо ${uri}) — это тот же трек`,
+    );
+    playingUri = pb.trackUri;
+    return true;
+  };
 
   const sleep = (ms: number): Promise<void> =>
     new Promise((resolve) => {
@@ -130,6 +187,16 @@ export function playSpotifyTrack(
     }
   };
 
+  /** Подробности для лога, когда играет не тот трек. Сбой диагностики не мешает воспроизведению. */
+  const diagnose = async (): Promise<string> => {
+    if (!spotify.diagnosePlayback) return '';
+    try {
+      return ` [диагностика: ${await spotify.diagnosePlayback(uri)}]`;
+    } catch (err) {
+      return ` [диагностика не удалась: ${String(err)}]`;
+    }
+  };
+
   /**
    * Старт заранее поставленного трека. true — Spotify уже играет его.
    * false — дальше обычное ожидание старта; если Spotify сам не переключился
@@ -140,7 +207,7 @@ export function playSpotifyTrack(
     for (;;) {
       const { pb } = await poll();
       if (stopped) return false;
-      if (pb !== 'error' && pb?.trackUri === uri) {
+      if (pb !== 'error' && pb && isOurs(pb)) {
         // Наш трек, но на паузе — "следующий" его бы пропустил; разберётся обычное ожидание старта.
         return pb.isPlaying;
       }
@@ -150,6 +217,7 @@ export function playSpotifyTrack(
       if (midTrack || Date.now() >= deadline) break;
       await sleep(NEAR_END_POLL_MS);
     }
+    logger.warn('playback', `Spotify сам не переключился на трек из очереди ${uri} — жму "следующий"${await diagnose()}`);
     await spotify.skipToNext();
     return false;
   };
@@ -178,17 +246,20 @@ export function playSpotifyTrack(
         continue;
       }
       errors = 0;
-      if (pb && pb.trackUri === uri && pb.isPlaying) {
+      if (pb && isOurs(pb) && pb.isPlaying) {
         started = true;
         break;
       }
-      if (pb && pb.trackUri && pb.trackUri !== uri && pb.isPlaying) {
+      if (pb && pb.trackUri && !isOurs(pb) && pb.isPlaying) {
         // Играет чужой трек. Даём Spotify один опрос "на переключение", потом
         // жмём "следующий": наш трек стоит в очереди Spotify где-то дальше.
         if (++foreignPolls >= 2 && extraSkips < MAX_EXTRA_SKIPS) {
           extraSkips++;
           foreignPolls = 0;
-          logger.warn('playback', `Spotify играет не тот трек (${pb.trackUri}) — переключаю на следующий в очереди`);
+          logger.warn(
+            'playback',
+            `Spotify играет не тот трек (${pb.trackUri}) — переключаю на следующий в очереди${await diagnose()}`,
+          );
           await spotify.skipToNext();
         }
         continue;
@@ -200,7 +271,7 @@ export function playSpotifyTrack(
       }
     }
     if (stopped) return;
-    if (!started) throw new Error(`Spotify так и не начал играть трек ${uri}`);
+    if (!started) throw new Error(`Spotify так и не начал играть трек ${uri}${await diagnose()}`);
 
     // --- 2. Трек играет — ждём конца ---
     errors = 0;
@@ -221,7 +292,7 @@ export function playSpotifyTrack(
       errors = 0;
 
       // Spotify ушёл на другой трек или устройство пропало — наш закончился (или его переключили вручную).
-      if (!pb || pb.trackUri !== uri) return;
+      if (!pb || pb.trackUri !== playingUri) return;
 
       const remaining = pb.durationMs - pb.progressMs - latencyMs;
       if (!pb.isPlaying) {
