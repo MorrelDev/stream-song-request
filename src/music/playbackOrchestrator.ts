@@ -339,7 +339,7 @@ export class PlaybackOrchestrator {
       return false;
     }
     this.queuedNext = next;
-    logger.info('playback', `Следующий трек заранее поставлен в очередь Spotify: "${next.track.title}"`);
+    logger.info('playback', `Следующий трек заранее поставлен в очередь Spotify: "${next.track.title}" (${next.track.playUri})`);
     return true;
   }
 
@@ -411,7 +411,7 @@ export class PlaybackOrchestrator {
     });
     logger.info(
       'playback',
-      `${item.kind === 'request' ? 'Играет заказ' : 'Играет дефолтный плейлист'}: "${track.title}" (${track.provider})`,
+      `${item.kind === 'request' ? 'Играет заказ' : 'Играет дефолтный плейлист'}: "${track.title}" (${track.provider}, ${track.playUri})`,
     );
     if (item.kind === 'default' && this.stream) {
       this.stream.trackStarted(track);
@@ -429,6 +429,7 @@ export class PlaybackOrchestrator {
           pollIntervalMs: this.cfg.pollIntervalMs,
           queued,
           prepareNext: () => this.queueNextSpotifyTrack(item),
+          expected: { title: track.title, artist: track.author },
         });
         current.startedAt = Date.now();
       } else {

@@ -1,8 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { playSpotifyTrack, type SpotifyPlayerApi } from '../src/music/spotifyTrackPlayer.ts';
+import { isSameSong, playSpotifyTrack, type SpotifyPlayerApi } from '../src/music/spotifyTrackPlayer.ts';
 
-type State = { isPlaying: boolean; progressMs: number; durationMs: number; trackUri: string | null } | null;
+type State = {
+  isPlaying: boolean;
+  progressMs: number;
+  durationMs: number;
+  trackUri: string | null;
+  trackTitle?: string | null;
+  trackArtist?: string | null;
+} | null;
 /** 'error' — эмуляция сетевого сбоя при опросе. */
 type Step = State | 'error';
 
@@ -182,4 +189,57 @@ test('трек из очереди Spotify, а прошлый ещё в само
   const spotify = scripted([prevAtEnd, playing(0), playing(199_500)]);
   await playSpotifyTrack(spotify, URI, { ...OPTS, queued: true }).finished;
   assert.deepEqual(spotify.calls, []);
+});
+
+test('играет не тот трек — диагностика (что играет, очередь) вызывается для лога, поведение то же', async () => {
+  const foreign = playing(1000, 200_000, 'spotify:track:stale');
+  const spotify = scripted([foreign, foreign, playing(0), playing(199_000)]);
+  const diagnosed: string[] = [];
+  const withDiagnose: SpotifyPlayerApi = {
+    ...spotify,
+    diagnosePlayback: async (expected) => {
+      diagnosed.push(expected);
+      throw new Error('сбой диагностики не должен мешать');
+    },
+  };
+  await playSpotifyTrack(withDiagnose, URI, OPTS).finished;
+  assert.deepEqual(spotify.calls, [`play ${URI}`, 'next']);
+  assert.deepEqual(diagnosed, [URI]);
+});
+
+test('Spotify играет ту же песню под другим id (альбом вместо сингла) — это наш трек: без скипов, конец по реальному id', async () => {
+  const album = (progressMs: number): State => ({
+    ...playing(progressMs, 200_000, 'spotify:track:album')!,
+    trackTitle: 'When You Were Young',
+    trackArtist: 'The Killers',
+  });
+  const steps: Step[] = [album(0), album(100_000), playing(0, 200_000, 'spotify:track:next')];
+  const spotify = scripted(steps);
+  let polls = 0;
+  const counting: SpotifyPlayerApi = {
+    ...spotify,
+    getCurrentPlayback: async () => {
+      polls++;
+      return spotify.getCurrentPlayback();
+    },
+  };
+  await playSpotifyTrack(counting, URI, { ...OPTS, expected: { title: 'When You Were Young', artist: 'The Killers' } }).finished;
+  assert.deepEqual(spotify.calls, [`play ${URI}`]);
+  assert.equal(polls, 3); // доиграл до перехода Spotify на следующий трек, а не закончился сразу
+});
+
+test('другая песня того же исполнителя — по-прежнему чужой трек, плеер жмёт "следующий"', async () => {
+  const other: State = { ...playing(1000, 200_000, 'spotify:track:other')!, trackTitle: 'Mr. Brightside', trackArtist: 'The Killers' };
+  const spotify = scripted([other, other, playing(0), playing(199_000)]);
+  await playSpotifyTrack(spotify, URI, { ...OPTS, expected: { title: 'When You Were Young', artist: 'The Killers' } }).finished;
+  assert.deepEqual(spotify.calls, [`play ${URI}`, 'next']);
+});
+
+test('isSameSong: уточнения версии в названии не мешают, исполнитель сравнивается по первому', () => {
+  const expected = { title: 'Master Of Puppets (Remastered)', artist: 'Metallica' };
+  assert.ok(isSameSong({ trackTitle: 'Master of Puppets - Remastered 2017', trackArtist: 'Metallica, Someone' }, expected));
+  assert.ok(isSameSong({ trackTitle: 'Master Of Puppets', trackArtist: 'metallica' }, expected));
+  assert.ok(!isSameSong({ trackTitle: 'Battery', trackArtist: 'Metallica' }, expected));
+  assert.ok(!isSameSong({ trackTitle: 'Master Of Puppets', trackArtist: 'Apocalyptica' }, expected));
+  assert.ok(!isSameSong({ trackTitle: null, trackArtist: 'Metallica' }, expected));
 });

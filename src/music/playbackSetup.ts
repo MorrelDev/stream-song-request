@@ -2,6 +2,8 @@ import { config } from '../core/config.ts';
 import { logger } from '../core/logger.ts';
 import { createSpotifyUserTokenStore } from './spotifyAuth.ts';
 import { SpotifyPlaybackController } from './spotifyProvider.ts';
+import { SPOTIFY_TOP_TRACKS } from './spotifyPlaylistUri.ts';
+import { loadSpotifyTopMix } from './spotifyTopMix.ts';
 import {
   playYoutubeUrl,
   preloadYoutubeInfo,
@@ -119,8 +121,10 @@ export function createDefaultPlaylistLoader(
   const playlistUri = config.spotify?.defaultPlaylistUri;
   if (spotifyController && playlistUri) {
     const controller = spotifyController;
+    const isTop = playlistUri === SPOTIFY_TOP_TRACKS;
+    if (isTop) logger.info('app', 'Дефолтный плейлист — микс топ-треков Spotify (год, полгода, месяц).');
     return async () =>
-      (await controller.fetchPlaylistTracks(playlistUri)).map((t) => ({
+      (await (isTop ? loadSpotifyTopMix(controller) : controller.fetchPlaylistTracks(playlistUri))).map((t) => ({
         provider: 'spotify' as const,
         playUri: t.uri,
         title: t.title,

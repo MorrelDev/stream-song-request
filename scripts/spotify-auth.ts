@@ -31,6 +31,8 @@ const scopes = [
   'user-modify-playback-state',
   'user-read-currently-playing',
   'playlist-read-private',
+  // для SPOTIFY_DEFAULT_PLAYLIST_URI=TOP (топ-треки вместо плейлиста)
+  'user-top-read',
 ].join(' ');
 
 const state = randomBytes(8).toString('hex');

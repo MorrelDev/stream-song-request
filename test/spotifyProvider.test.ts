@@ -160,7 +160,7 @@ test('fetchPlaylistTracks: читает /items постранично, проп�
     ['spotify:track:1', 'spotify:track:3'],
   );
   assert.deepEqual(tracks[0], { uri: 'spotify:track:1', title: 'T1', artist: 'A', durationMs: 1000 });
-  assert.match(urls[0], /\/v1\/playlists\/abc\/items\?/);
+  assert.match(urls[0], /\/v1\/playlists\/abc\/items\?.*market=from_token/);
   assert.equal(urls.length, 2);
 });
 
@@ -170,6 +170,74 @@ test('fetchPlaylistTracks: HTTP 403 — подсказка добавить пл
   const controller = new SpotifyPlaybackController(fakeUserAuth, fakeFetch);
 
   await assert.rejects(() => controller.fetchPlaylistTracks('spotify:playlist:abc'), /403.*медиатек/s);
+});
+
+test('fetchTopTracks: читает /me/top/tracks long_term постранично, пропускает локальные и недоступные', async () => {
+  const fakeUserAuth = { getValidAccessToken: async () => 'user-token' };
+  const urls: string[] = [];
+  const track = (id: string, extra: object = {}) => ({
+    uri: `spotify:track:${id}`, name: `T${id}`, duration_ms: 1000, artists: [{ name: 'A' }], ...extra,
+  });
+  const fakeFetch = (async (url: string | URL) => {
+    urls.push(String(url));
+    const page2 = String(url).includes('offset=50');
+    return new Response(
+      JSON.stringify(
+        page2
+          ? { next: null, items: [track('3')] }
+          : {
+              next: 'https://api.spotify.com/v1/me/top/tracks?time_range=long_term&offset=50&limit=50',
+              items: [track('1'), track('l', { is_local: true }), track('2', { is_playable: false }), null],
+            },
+      ),
+      { status: 200 },
+    );
+  }) as typeof fetch;
+  const controller = new SpotifyPlaybackController(fakeUserAuth, fakeFetch);
+
+  const tracks = await controller.fetchTopTracks('long_term');
+
+  assert.deepEqual(tracks.map((t) => t.uri), ['spotify:track:1', 'spotify:track:3']);
+  assert.deepEqual(tracks[0], { uri: 'spotify:track:1', title: 'T1', artist: 'A', durationMs: 1000 });
+  assert.match(urls[0], /\/v1\/me\/top\/tracks\?time_range=long_term&limit=50&market=from_token$/);
+  assert.equal(urls.length, 2);
+});
+
+test('fetchTopTracks: HTTP 403 — подсказка заново пройти авторизацию', async () => {
+  const fakeUserAuth = { getValidAccessToken: async () => 'user-token' };
+  const fakeFetch = (async () => new Response('{"error":{"status":403}}', { status: 403 })) as typeof fetch;
+  const controller = new SpotifyPlaybackController(fakeUserAuth, fakeFetch);
+
+  await assert.rejects(() => controller.fetchTopTracks('long_term'), /403.*user-top-read.*auth:spotify/s);
+});
+
+test('diagnosePlayback: что играет (с linked_from) и первые треки очереди — одной строкой', async () => {
+  const fakeUserAuth = { getValidAccessToken: async () => 'user-token' };
+  const fakeFetch = (async (url: string | URL) => {
+    const u = String(url);
+    if (u.includes('/me/player/queue')) {
+      return new Response(
+        JSON.stringify({ queue: [{ uri: 'spotify:track:q1', name: 'Q1', artists: [{ name: 'B' }] }] }),
+        { status: 200 },
+      );
+    }
+    assert.match(u, /\/me\/player\?market=from_token$/);
+    return new Response(
+      JSON.stringify({
+        is_playing: true,
+        item: { uri: 'spotify:track:x', name: 'X', artists: [{ name: 'A' }], linked_from: { uri: 'spotify:track:ours' } },
+      }),
+      { status: 200 },
+    );
+  }) as typeof fetch;
+  const controller = new SpotifyPlaybackController(fakeUserAuth, fakeFetch);
+
+  const text = await controller.diagnosePlayback('spotify:track:ours');
+  assert.equal(
+    text,
+    'ожидался spotify:track:ours | играет: spotify:track:x "A - X", linked_from: spotify:track:ours | ' +
+      'очередь: spotify:track:q1 "B - Q1"',
+  );
 });
 
 test('SpotifyPlaybackController.skipToNext отправляет POST на /me/player/next', async () => {
