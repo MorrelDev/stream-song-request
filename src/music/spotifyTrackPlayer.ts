@@ -222,6 +222,10 @@ export function playSpotifyTrack(
     return false;
   };
 
+  /** Spotify подтвердил, что играет именно наш трек (см. PlaybackSession.audioStarted). */
+  let resolveAudioStarted!: () => void;
+  const audioStarted = new Promise<void>((resolve) => (resolveAudioStarted = resolve));
+
   const finished = (async () => {
     // --- 1. Ждём, пока заиграет именно наш трек ---
     let started = false;
@@ -272,6 +276,7 @@ export function playSpotifyTrack(
     }
     if (stopped) return;
     if (!started) throw new Error(`Spotify так и не начал играть трек ${uri}${await diagnose()}`);
+    resolveAudioStarted();
 
     // --- 2. Трек играет — ждём конца ---
     errors = 0;
@@ -337,5 +342,6 @@ export function playSpotifyTrack(
       stopped = true;
       wake?.();
     },
+    audioStarted,
   };
 }

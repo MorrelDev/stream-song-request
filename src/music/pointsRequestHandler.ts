@@ -1,6 +1,7 @@
 import { eventBus } from '../core/eventBus.ts';
 import { logger } from '../core/logger.ts';
 import { processSongRequest, describeLinkSources, type RequestHandlerConfig, type SongRequestOutcome } from './requestHandler.ts';
+import { detachRedemption } from '../db/musicQueue.ts';
 import type { RewardRedeemedEvent } from '../core/events.ts';
 import type { RedemptionStatus } from '../integrations/twitch/channelPointsApi.ts';
 
@@ -31,12 +32,13 @@ export function registerPointsRequestHandler(cfg: PointsRequestHandlerConfig, fe
 /**
  * Одна активация награды "заказ музыки": те же правила, что и у команды
  * заказа (см. processSongRequest), кроме проверки фолловинга — за баллы
- * может заказывать любой зритель. Трек встал в очередь — активация
- * выполнена; не встал по любой причине (включая непредвиденную ошибку) —
- * активация отклоняется, и Twitch сам возвращает зрителю баллы.
+ * может заказывать любой зритель. Трек встал в очередь — активация ждёт,
+ * пока трек зазвучит (тогда её выполняют; не запустился — отклоняют, см.
+ * pointsMode.ts); не встал по любой причине (включая непредвиденную ошибку)
+ * — активация отклоняется сразу, и Twitch сам возвращает зрителю баллы.
  *
  * В Privilege-режиме заказ стримера, модератора или VIP, вставший в очередь,
- * тоже отклоняется — трек остаётся в очереди, а баллы возвращаются.
+ * отклоняется сразу — трек остаётся в очереди, а баллы возвращаются.
  */
 export async function handleRedemption(
   redemption: RewardRedeemedEvent,
@@ -48,6 +50,7 @@ export async function handleRedemption(
     login: redemption.userLogin,
     displayName: redemption.userName,
     isBroadcaster: redemption.userId === cfg.request.twitchBroadcasterId,
+    redemption: { redemptionId: redemption.redemptionId, rewardId: redemption.rewardId },
   };
 
   let outcome: SongRequestOutcome;
@@ -72,7 +75,18 @@ export async function handleRedemption(
 
   const free = outcome.queued && (await isFreeRequest(redemption, requester.isBroadcaster, cfg));
 
-  const status: RedemptionStatus = outcome.queued && !free ? 'FULFILLED' : 'CANCELED';
+  // Платный заказ встал в очередь — активация остаётся "в ожидании": её
+  // выполнят, когда трек зазвучит, или отклонят с возвратом баллов, если он
+  // не запустится (см. pointsMode.ts, событие song.request_finished).
+  if (outcome.queued && !free) {
+    reply(outcome.replyText);
+    return;
+  }
+  // Бесплатный заказ (Privilege-режим) встал в очередь — активацию отклоняем
+  // сразу и отвязываем от заказа, чтобы её больше не трогали. Заказ не
+  // принят — активация отклоняется сразу. В обоих случаях баллы возвращаются.
+  if (free && outcome.requestId !== undefined) detachRedemption(outcome.requestId);
+  const status: RedemptionStatus = 'CANCELED';
   let statusUpdated = true;
   try {
     await cfg.setRedemptionStatus(redemption, status);
@@ -86,7 +100,7 @@ export async function handleRedemption(
     );
   }
 
-  if ((outcome.queued && !free) || statusUpdated) {
+  if (statusUpdated) {
     reply(outcome.replyText);
   } else {
     reply(`${outcome.replyText} (баллы не удалось вернуть автоматически — стример вернёт их вручную)`);

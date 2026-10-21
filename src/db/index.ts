@@ -47,6 +47,13 @@ export function initDb(path: string): void {
       value TEXT NOT NULL
     );
   `);
+
+  // Заказ за баллы канала: какой активацией награды он оплачен — чтобы
+  // выполнить её, когда трек зазвучит, или вернуть баллы, если не запустился
+  // (см. music/pointsMode.ts). В старых базах этих колонок нет — добавляем.
+  const columns = (db.prepare('PRAGMA table_info(song_requests)').all() as Array<{ name: string }>).map((c) => c.name);
+  if (!columns.includes('redemption_id')) db.exec('ALTER TABLE song_requests ADD COLUMN redemption_id TEXT');
+  if (!columns.includes('reward_id')) db.exec('ALTER TABLE song_requests ADD COLUMN reward_id TEXT');
 }
 
 /** Доступ к общему инстансу БД для остальных модулей (db/musicQueue.ts и т.п.). */

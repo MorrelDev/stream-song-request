@@ -63,6 +63,8 @@ export interface SongRequester {
   login: string;
   displayName: string;
   isBroadcaster: boolean;
+  /** Заказ за баллы канала: активация награды — записывается вместе с заказом (см. pointsMode.ts). */
+  redemption?: { redemptionId: string; rewardId: string };
 }
 
 export interface SongRequestOptions {
@@ -77,6 +79,8 @@ export interface SongRequestOutcome {
   queued: boolean;
   /** Готовый ответ в чат (с упоминанием зрителя). */
   replyText: string;
+  /** id заказа в очереди (db/musicQueue.ts), если он поставлен. */
+  requestId?: number;
 }
 
 function reply(text: string): void {
@@ -226,7 +230,7 @@ async function handleYoutubeRequest(
     };
   }
 
-  const { position } = enqueueSongRequest({
+  const { id: requestId, position } = enqueueSongRequest({
     provider: 'youtube',
     externalId: videoId,
     playUri: `https://www.youtube.com/watch?v=${videoId}`,
@@ -235,11 +239,14 @@ async function handleYoutubeRequest(
     durationSec: details.durationSec,
     requestedById: requester.userId,
     requestedByLogin: requester.login,
+    redemptionId: requester.redemption?.redemptionId ?? null,
+    rewardId: requester.redemption?.rewardId ?? null,
   });
 
   eventBus.emit('song.queued', { title: details.title, provider: 'youtube', position });
   return {
     queued: true,
+    requestId,
     replyText: `${mention} трек добавлен в очередь: "${formatTrackTitle('youtube', details.title, details.channelTitle)}" (позиция ${position})`,
   };
 }
@@ -260,7 +267,7 @@ async function handleSpotifyRequest(
 
 /** Общий "хвост" постановки в очередь для заказа по ссылке и по текстовому поиску (#6). */
 function enqueueSpotifyTrack(details: SpotifyTrackDetails, requester: SongRequester, mention: string): SongRequestOutcome {
-  const { position } = enqueueSongRequest({
+  const { id: requestId, position } = enqueueSongRequest({
     provider: 'spotify',
     externalId: details.trackId,
     playUri: details.uri,
@@ -269,6 +276,8 @@ function enqueueSpotifyTrack(details: SpotifyTrackDetails, requester: SongReques
     durationSec: Math.round(details.durationMs / 1000),
     requestedById: requester.userId,
     requestedByLogin: requester.login,
+    redemptionId: requester.redemption?.redemptionId ?? null,
+    rewardId: requester.redemption?.rewardId ?? null,
   });
 
   eventBus.emit('song.queued', { title: details.title, provider: 'spotify', position });
@@ -277,6 +286,7 @@ function enqueueSpotifyTrack(details: SpotifyTrackDetails, requester: SongReques
   // всегда понятно, о каком именно треке речь (мало ли каверов/ремиксов).
   return {
     queued: true,
+    requestId,
     replyText: `${mention} трек добавлен в очередь: "${formatTrackTitle('spotify', details.title, details.artist)}" (позиция ${position})`,
   };
 }
@@ -298,7 +308,7 @@ async function handleYandexRequest(
     return { queued: false, replyText: `${mention} этот трек Яндекс Музыки недоступен для прослушивания` };
   }
 
-  const { position } = enqueueSongRequest({
+  const { id: requestId, position } = enqueueSongRequest({
     provider: 'yandex',
     externalId: details.trackId,
     playUri: yandexPlayUri(details.trackId),
@@ -307,11 +317,14 @@ async function handleYandexRequest(
     durationSec: details.durationSec,
     requestedById: requester.userId,
     requestedByLogin: requester.login,
+    redemptionId: requester.redemption?.redemptionId ?? null,
+    rewardId: requester.redemption?.rewardId ?? null,
   });
 
   eventBus.emit('song.queued', { title: details.title, provider: 'yandex', position });
   return {
     queued: true,
+    requestId,
     replyText: `${mention} трек добавлен в очередь: "${formatTrackTitle('yandex', details.title, details.artist)}" (позиция ${position})`,
   };
 }

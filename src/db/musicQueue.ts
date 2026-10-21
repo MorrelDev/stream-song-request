@@ -11,6 +11,13 @@ export interface NewSongRequest {
   durationSec: number;
   requestedById: string;
   requestedByLogin: string;
+  /**
+   * Заказ за баллы канала: активация награды, которой он оплачен. Остаётся
+   * "в ожидании", пока трек не зазвучит (тогда её выполняют), а если не
+   * запустился — её отклоняют, и Twitch возвращает баллы (см. pointsMode.ts).
+   */
+  redemptionId?: string | null;
+  rewardId?: string | null;
 }
 
 export interface QueuedSongRequest extends NewSongRequest {
@@ -31,6 +38,8 @@ interface SongRequestRow {
   requested_by_login: string;
   status: string;
   created_at: string;
+  redemption_id?: string | null;
+  reward_id?: string | null;
 }
 
 function rowToRequest(row: SongRequestRow): QueuedSongRequest {
@@ -46,6 +55,8 @@ function rowToRequest(row: SongRequestRow): QueuedSongRequest {
     requestedByLogin: row.requested_by_login,
     status: row.status as QueuedSongRequest['status'],
     createdAt: row.created_at,
+    redemptionId: row.redemption_id ?? null,
+    rewardId: row.reward_id ?? null,
   };
 }
 
@@ -64,8 +75,8 @@ export function enqueueSongRequest(track: NewSongRequest): { id: number; positio
   const info = db
     .prepare(
       `INSERT INTO song_requests
-         (provider, external_id, play_uri, title, author, duration_sec, requested_by_id, requested_by_login, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+         (provider, external_id, play_uri, title, author, duration_sec, requested_by_id, requested_by_login, status, created_at, redemption_id, reward_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
     )
     .run(
       track.provider,
@@ -77,6 +88,8 @@ export function enqueueSongRequest(track: NewSongRequest): { id: number; positio
       track.requestedById,
       track.requestedByLogin,
       new Date().toISOString(),
+      track.redemptionId ?? null,
+      track.rewardId ?? null,
     );
   return { id: Number(info.lastInsertRowid), position: positionBefore + 1 };
 }
@@ -95,4 +108,25 @@ export function markPlaying(id: number): void {
 
 export function markDone(id: number): void {
   getDb().prepare(`UPDATE song_requests SET status = 'done' WHERE id = ?`).run(id);
+}
+
+/** Активации наград у заказов, которые ещё ждут очереди: их при старте не отклоняем. */
+export function pendingRedemptionIds(): string[] {
+  const rows = getDb()
+    .prepare(`SELECT redemption_id FROM song_requests WHERE status = 'pending' AND redemption_id IS NOT NULL`)
+    .all() as Array<{ redemption_id: string }>;
+  return rows.map((r) => r.redemption_id);
+}
+
+/** Активация награды, которой сейчас оплачен заказ (null — заказ не за баллы или бесплатный). */
+export function getRequestRedemption(id: number): { redemptionId: string; rewardId: string } | null {
+  const row = getDb().prepare('SELECT redemption_id, reward_id FROM song_requests WHERE id = ?').get(id) as
+    | { redemption_id: string | null; reward_id: string | null }
+    | undefined;
+  return row?.redemption_id && row.reward_id ? { redemptionId: row.redemption_id, rewardId: row.reward_id } : null;
+}
+
+/** Заказ стал бесплатным (Privilege-режим): активацию уже отклонили — больше её не трогаем. */
+export function detachRedemption(id: number): void {
+  getDb().prepare('UPDATE song_requests SET redemption_id = NULL, reward_id = NULL WHERE id = ?').run(id);
 }

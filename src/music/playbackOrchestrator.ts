@@ -419,9 +419,12 @@ export class PlaybackOrchestrator {
     }
 
     let ok = true;
+    // Звук реально пошёл? Для заказа за баллы — выполнить награду или вернуть баллы.
+    let audioConfirmed = false;
+    let audioKnown = false;
     let prepareTimer: ReturnType<typeof setTimeout> | undefined;
     try {
-      let session: { finished: Promise<void>; stop: () => void };
+      let session: { finished: Promise<void>; stop: () => void; audioStarted?: Promise<void> };
       if (track.provider === 'spotify') {
         if (!this.spotify) throw new Error('трек Spotify, но Spotify не настроен');
         this.spotifyMayBePlaying = true;
@@ -449,6 +452,12 @@ export class PlaybackOrchestrator {
         }
       }
       current.stop = session.stop;
+      if (session.audioStarted) {
+        audioKnown = true;
+        void session.audioStarted.then(() => {
+          audioConfirmed = true;
+        });
+      }
       // Скип/остановка могли прийти, пока запускали трек.
       if (this.stopped) session.stop();
       await session.finished;
@@ -457,6 +466,19 @@ export class PlaybackOrchestrator {
       logger.error('playback', `Ошибка воспроизведения "${track.title}" — перехожу к следующему треку`, err);
     }
     clearTimeout(prepareTimer);
+    await Promise.resolve(); // дать отработать .then у audioStarted, если он только что наступил
+
+    if (item.kind === 'request') {
+      eventBus.emit('song.request_finished', {
+        requestId: item.track.id,
+        title: track.title,
+        requestedByLogin: item.track.requestedByLogin,
+        redemptionId: item.track.redemptionId ?? null,
+        rewardId: item.track.rewardId ?? null,
+        // Плеер без сигнала о старте звука (тестовые подделки) — судим по исходу.
+        audioStarted: audioKnown ? audioConfirmed : ok,
+      });
+    }
 
     const halted = this.haltRequested;
     this.haltRequested = false;

@@ -93,12 +93,14 @@ beforeEach(() => {
   setRequestsPaused(false);
 });
 
-test('валидный заказ за баллы — трек в очереди, активация выполнена (FULFILLED)', async () => {
+test('валидный заказ за баллы — трек в очереди, активация ждёт, пока трек зазвучит (статус не меняется)', async () => {
   const { replies, unsubscribe } = collectReplies();
   const { cfg, statuses } = makeCfg();
   try {
     await handleRedemption(makeRedemption(), cfg, fakeFetch({ followedDaysAgo: 10, youtubeDurationIso: 'PT3M0S' }));
-    assert.deepEqual(statuses, [{ id: 'red-1', status: 'FULFILLED' }]);
+    assert.deepEqual(statuses, [], 'выполнит/отклонит pointsMode по событию song.request_finished');
+    assert.equal(peekNextPending()?.redemptionId, 'red-1', 'активация записана вместе с заказом');
+    assert.ok(peekNextPending()?.rewardId);
     assert.equal(peekNextPending()?.title, 'Cool video');
     assert.equal(peekNextPending()?.requestedById, 'viewer-1');
     assert.equal(replies.length, 1);
@@ -108,7 +110,7 @@ test('валидный заказ за баллы — трек в очереди
   }
 });
 
-test('фолловинг за баллы не требуется — проверка не вызывается вовсе, заказ не-фолловера выполняется', async () => {
+test('фолловинг за баллы не требуется — проверка не вызывается вовсе, заказ не-фолловера встаёт в очередь', async () => {
   const { replies, unsubscribe } = collectReplies();
   const { cfg, statuses } = makeCfg();
   const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
@@ -119,7 +121,7 @@ test('фолловинг за баллы не требуется — прове�
   }) as typeof fetch;
   try {
     await handleRedemption(makeRedemption(), cfg, fetchImpl);
-    assert.deepEqual(statuses, [{ id: 'red-1', status: 'FULFILLED' }]);
+    assert.deepEqual(statuses, []);
     assert.equal(peekNextPending()?.requestedById, 'viewer-1');
     assert.match(replies[0], /трек добавлен в очередь/);
   } finally {
@@ -204,18 +206,20 @@ test('Privilege-режим: заказ модератора/VIP встаёт в 
     assert.deepEqual(checked, ['viewer-1']);
     assert.deepEqual(statuses, [{ id: 'red-1', status: 'CANCELED' }]);
     assert.equal(peekNextPending()?.requestedById, 'viewer-1');
+    assert.equal(peekNextPending()?.redemptionId, null, 'активация отвязана — потом её не тронут');
     assert.match(replies[0], /@Viewer1 трек добавлен в очередь.*Cool video.*позиция 1/s);
   } finally {
     unsubscribe();
   }
 });
 
-test('Privilege-режим: обычный зритель платит как раньше (FULFILLED)', async () => {
+test('Privilege-режим: обычный зритель платит как раньше (активация ждёт, пока трек зазвучит)', async () => {
   const { replies, unsubscribe } = collectReplies();
   const { cfg, statuses } = makeCfg({ isPrivileged: async () => false });
   try {
     await handleRedemption(makeRedemption(), cfg, fakeFetch({ followedDaysAgo: 10, youtubeDurationIso: 'PT3M0S' }));
-    assert.deepEqual(statuses, [{ id: 'red-1', status: 'FULFILLED' }]);
+    assert.deepEqual(statuses, []);
+    assert.equal(peekNextPending()?.redemptionId, 'red-1');
     assert.match(replies[0], /трек добавлен в очередь/);
   } finally {
     unsubscribe();
@@ -242,7 +246,7 @@ test('Privilege-режим: стример бесплатно без запро�
   }
 });
 
-test('Privilege-режим: роль узнать не удалось — заказ платный (FULFILLED), трек в очереди', async () => {
+test('Privilege-режим: роль узнать не удалось — заказ платный (ждёт звука), трек в очереди', async () => {
   const { unsubscribe } = collectReplies();
   const { cfg, statuses } = makeCfg({
     isPrivileged: async () => {
@@ -251,8 +255,8 @@ test('Privilege-режим: роль узнать не удалось — зак
   });
   try {
     await handleRedemption(makeRedemption(), cfg, fakeFetch({ followedDaysAgo: 10, youtubeDurationIso: 'PT3M0S' }));
-    assert.deepEqual(statuses, [{ id: 'red-1', status: 'FULFILLED' }]);
-    assert.ok(peekNextPending());
+    assert.deepEqual(statuses, []);
+    assert.equal(peekNextPending()?.redemptionId, 'red-1');
   } finally {
     unsubscribe();
   }
@@ -292,7 +296,8 @@ test('registerPointsRequestHandler подключает обработчик к 
   try {
     eventBus.emit('channel_points.redeemed', makeRedemption());
     await new Promise((resolve) => setTimeout(resolve, 50));
-    assert.deepEqual(statuses, [{ id: 'red-1', status: 'FULFILLED' }]);
+    assert.equal(peekNextPending()?.redemptionId, 'red-1', 'заказ встал в очередь вместе с активацией');
+    assert.deepEqual(statuses, []);
   } finally {
     unregister();
     unsubscribe();

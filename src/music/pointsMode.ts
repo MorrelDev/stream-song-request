@@ -16,7 +16,8 @@ import {
 import { TwitchEventSubClient } from '../integrations/twitch/eventSubClient.ts';
 import { registerPointsRequestHandler } from './pointsRequestHandler.ts';
 import type { RequestHandlerConfig } from './requestHandler.ts';
-import type { RewardRedeemedEvent } from '../core/events.ts';
+import { getRequestRedemption, pendingRedemptionIds } from '../db/musicQueue.ts';
+import type { RewardRedeemedEvent, SongRequestFinishedEvent } from '../core/events.ts';
 
 // id награды, созданной приложением, — по нему она находится при следующих
 // запусках, даже если её переименовали в панели Twitch.
@@ -93,7 +94,10 @@ export async function startPointsRequestMode(cfg: PointsModeConfig, fetchImpl: t
   eventBus.on('channel_points.redeemed', onRedeemed);
 
   try {
-    const stale = await listUnfulfilledRedemptions(cfg.api, rewardId, fetchImpl);
+    // Заказы, которые ещё ждут очереди, тоже "в ожидании" — их не трогаем:
+    // выполнятся или вернутся, когда до них дойдёт очередь.
+    const waiting = new Set(pendingRedemptionIds());
+    const stale = (await listUnfulfilledRedemptions(cfg.api, rewardId, fetchImpl)).filter((r) => !waiting.has(r.id));
     if (stale.length > 0) {
       await updateRedemptionStatus(
         cfg.api,
@@ -122,6 +126,20 @@ export async function startPointsRequestMode(cfg: PointsModeConfig, fetchImpl: t
     fetchImpl,
   );
 
+  // Заказ доигран, скипнут или не запустился: звук пошёл — активация
+  // выполнена; не пошёл (yt-dlp не скачал, Spotify не заиграл, скипнули до
+  // начала) — отклонена, и Twitch возвращает зрителю баллы.
+  const onRequestFinished = (e: SongRequestFinishedEvent): void => {
+    // Активацию берём из базы, а не из события: заказ мог стать бесплатным
+    // (Privilege-режим), и тогда она уже отклонена и отвязана.
+    const current = getRequestRedemption(e.requestId);
+    const settled = { ...e, redemptionId: current?.redemptionId ?? null, rewardId: current?.rewardId ?? null };
+    void settleRequestRedemption(settled, (rewardId, redemptionId, status) =>
+      updateRedemptionStatus(cfg.api, rewardId, [redemptionId], status, fetchImpl),
+    );
+  };
+  eventBus.on('song.request_finished', onRequestFinished);
+
   const client = new TwitchEventSubClient(
     {
       clientId: cfg.api.clientId,
@@ -139,6 +157,7 @@ export async function startPointsRequestMode(cfg: PointsModeConfig, fetchImpl: t
       client.disconnect();
       unregister();
       eventBus.off('channel_points.redeemed', onRedeemed);
+      eventBus.off('song.request_finished', onRequestFinished);
       // Пауза, а не выключение: награда остаётся видна зрителям, но
       // активировать её, пока заказы некому обрабатывать, нельзя.
       await updateReward(cfg.api, rewardId, { is_paused: true }, fetchImpl);
@@ -160,4 +179,31 @@ export async function disablePointsReward(
   if (!reward) return null;
   await updateReward(api, reward.id, { is_enabled: false }, fetchImpl);
   return reward.title;
+}
+
+/**
+ * Заказ за баллы закончился: звук пошёл — активация выполнена; не пошёл —
+ * отклонена (Twitch возвращает баллы), и в чат уходит объяснение. Заказ не
+ * за баллы (команда !sr) — ничего не делает.
+ */
+export async function settleRequestRedemption(
+  e: SongRequestFinishedEvent,
+  setStatus: (rewardId: string, redemptionId: string, status: 'FULFILLED' | 'CANCELED') => Promise<void>,
+): Promise<void> {
+  if (!e.redemptionId || !e.rewardId) return;
+  const status = e.audioStarted ? 'FULFILLED' : 'CANCELED';
+  try {
+    await setStatus(e.rewardId, e.redemptionId, status);
+  } catch (err) {
+    logger.error(
+      'music',
+      `Не удалось отметить заказ "${e.title}" (${e.requestedByLogin}) как ${status} — его можно обработать вручную в очереди запросов наград на Twitch`,
+      err,
+    );
+    return;
+  }
+  if (status === 'CANCELED') {
+    logger.warn('music', `Заказ "${e.title}" (${e.requestedByLogin}) не запустился — баллы возвращены`);
+    eventBus.emit('chat.reply', { text: `@${e.requestedByLogin} не получилось включить "${e.title}" — баллы вернул` });
+  }
 }

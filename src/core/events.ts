@@ -59,6 +59,21 @@ export interface RewardRedeemedEvent {
 }
 
 /**
+ * Заказ закончился — доиграл, его скипнули или он так и не запустился.
+ * audioStarted: звук заказа реально пошёл (mpv открыл аудиовыход / Spotify
+ * подтвердил наш трек). По нему заказ за баллы выполняется или баллы
+ * возвращаются (см. music/pointsMode.ts).
+ */
+export interface SongRequestFinishedEvent {
+  requestId: number;
+  title: string;
+  requestedByLogin: string;
+  redemptionId: string | null;
+  rewardId: string | null;
+  audioStarted: boolean;
+}
+
+/**
  * Карта "имя события -> тип payload".
  * При добавлении новой фичи (файловая система) сюда добавляются новые
  * события — остальной код не меняется.
@@ -68,5 +83,6 @@ export interface AppEvents {
   'chat.reply': ChatReplyEvent;
   'song.queued': SongQueuedEvent;
   'song.now_playing': SongNowPlayingEvent;
+  'song.request_finished': SongRequestFinishedEvent;
   'channel_points.redeemed': RewardRedeemedEvent;
 }
